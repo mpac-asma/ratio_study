@@ -1,0 +1,73 @@
+╔══════════════════════════════════════════════════════════════════╗
+║          CROSS-MODULE IMPORT WIRING  (ratio_study v0.3)        ║
+╠══════════════════════════════════════════════════════════════════╣
+║                                                                  ║
+║  MODULE                 IMPORTS FROM                             ║
+║  ─────────────────────  ──────────────────────────────────────── ║
+║                                                                  ║
+║  helpers.py             (no internal imports — leaf module)       ║
+║                                                                  ║
+║  gini_core.py           from .helpers import _simple_regression  ║
+║                                                                  ║
+║  gini_decomposition.py  from .gini_core import gini_coeff,      ║
+║                              gini_stats                          ║
+║                         from .helpers import _gini_wtd,          ║
+║                              custom_format                       ║
+║                                                                  ║
+║  bootstrap.py           from .helpers import _asr_median,        ║
+║                              _asr_mean, _cod, _prd, _prb, …     ║
+║                         from .ratios_calculator import           ║
+║                              _ratios_calculator,                 ║
+║                              _ratios_calculator_wrap             ║
+║                                                                  ║
+║  vei.py                 from .helpers import _asr_median         ║
+║                         (mostly self-contained)                  ║
+║                                                                  ║
+║  compare.py             (no internal imports — uses pandas only) ║
+║                                                                  ║
+║  ratios_calculator.py   from .helpers import _asr_median,        ║
+║                              _asr_mean, _cod, _prd, _prb,       ║
+║                              _rmse, _mae, _mape, _mdmape,       ║
+║                              _fsd, _CoV_adj, _CoC               ║
+║                         from .gini_core import gini_stats        ║
+║                         from .vei import vei_analysis            ║
+║                                                                  ║
+║  orchestrator.py        from .ratios_calculator import           ║
+║                              _ratios_calculator                  ║
+║                         from .bootstrap import                   ║
+║                              _bootstrap_analysis                 ║
+║                         from .gini_decomposition import          ║
+║                              gini_decomp, gini_factors           ║
+║                         from .helpers import iqr_filter,         ║
+║                              _add_needed_variables,              ║
+║                              custom_format,                      ║
+║                              _add_suffixes_to_list               ║
+║                         from .reporting import _add_comments     ║
+║                                                                  ║
+║  reporting.py           from .helpers import custom_format       ║
+║                                                                  ║
+║  graphs.py              (matplotlib/seaborn/reportlab — leaf)    ║
+║                                                                  ║
+╚══════════════════════════════════════════════════════════════════╝
+
+DEPENDENCY GRAPH (simplified):
+
+    helpers.py  ◄──────────────────────────────────────────┐
+        ▲                                                  │
+        │                                                  │
+    gini_core.py                                           │
+        ▲                                                  │
+        │                                                  │
+    gini_decomposition.py                                  │
+        ▲                                                  │
+        │                                                  │
+    vei.py ──────────────────────────────────────────────►──┤
+        ▲                                                  │
+        │                                                  │
+    ratios_calculator.py ◄─── bootstrap.py                 │
+        ▲                         ▲                        │
+        │                         │                        │
+    orchestrator.py ──────────────┘                        │
+        ▲                                                  │
+        │                                                  │
+    reporting.py ◄── graphs.py ─────────────────────────►──┘

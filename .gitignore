@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Editors / OS
+.DS_Store
+.vscode/
+.idea/
+.claude/
+
+# Local secrets and certificates - never commit
+*.pem
+*.key
+.env
+
+# Files written by running the example notebooks
+examples/*.pdf
+examples/*.zip
+examples/*.csv
+examples/*.csv.gz
+examples/*.xlsx
+examples/*.png
+examples/*.html

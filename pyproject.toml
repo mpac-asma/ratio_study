@@ -1,0 +1,94 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ratio_study"
+version = "0.4.5"
+description = "IAAO-compliant Ratio Studies for real-property valuation analysis"
+readme = "README.md"
+license = "GPL-3.0-or-later"
+requires-python = ">=3.9"
+authors = [
+    {name = "Eric Kutchukian", email = "eric.kutchukian@mpac.ca"},
+]
+keywords = ["ratio-study", "IAAO", "property-assessment", "gini", "COD", "PRD", "PRB"]
+dependencies = [
+    "numpy>=1.21",
+    "pandas>=1.3",
+    "polars>=0.20; python_version >= '3.9'",
+    "pyarrow>=10.0",
+    "scipy>=1.7",
+    "statsmodels>=0.13",
+    "matplotlib>=3.4",
+    "seaborn>=0.11",
+    "reportlab>=3.6",
+    "narwhals>=1.13",
+]
+
+[project.optional-dependencies]
+# Interactive Plotly charts (ve_scat_median_plot). Plotly is ~167 MB and is
+# needed by exactly one chart; the matplotlib vertical_equity_panel covers
+# the same analysis without it.
+interactive = [
+    "plotly>=5.0",
+]
+# ML/SHAP inequity diagnostics (ml_diagnostics.py). XGBoost supplies exact
+# TreeSHAP natively via pred_contribs, so the `shap` package is not needed.
+ml = [
+    "scikit-learn>=1.3",
+    "xgboost>=2.0",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "flake8>=6.0",
+    "black>=23.0",
+    "mypy>=1.0",
+]
+examples = [
+    "jupyter>=1.0",
+    "ipykernel>=6.0",
+]
+mcp = [
+    "mcp>=1.0",
+    "pyreadstat>=1.1",  # for SPSS .sav support
+]
+# Neighbourhood ratio maps and Moran's I hot/cold-spot diagnostics
+# (spatial.py). The `moran_i` indicator in indicators.py needs only
+# libpysal/esda from this list; the mapping functions in spatial.py
+# need the rest for building and rendering interactive maps.
+spatial = [
+    "geopandas>=0.13",
+    "libpysal>=4.9",
+    "esda>=2.5",
+    "splot>=1.1",
+    "lonboard>=0.9",
+    "ipywidgets>=8.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/mpac-asma/ratio_study"
+Documentation = "https://github.com/mpac-asma/ratio_study/tree/main/docs"
+Issues = "https://github.com/mpac-asma/ratio_study/issues"
+Changelog = "https://github.com/mpac-asma/ratio_study/blob/main/CHANGELOG.md"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ratio_study = ["data/*.parquet"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Resolve `ratio_study` from src/ during tests. Without this, an installed
+# copy in site-packages shadows the working tree and the suite silently
+# tests the released version instead of the code under development.
+pythonpath = ["src"]
+addopts = "-v --tb=short"
+
+[tool.black]
+line-length = 120
+
+[tool.mypy]
+ignore_missing_imports = true
