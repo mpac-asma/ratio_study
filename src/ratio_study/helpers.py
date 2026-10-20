@@ -747,7 +747,8 @@ def _get_group_sizes(n, m, percentile_method='R7'):
     """
     Compute group sizes for an ``m``-way partition of ``n`` observations
     in ascending order, using a Hyndman & Fan (1996) percentile rank
-    method as specified in the IAAO Exposure Draft (May 2026) Section E.3.
+    method as specified in the IAAO Standard on Ratio Studies (October 2026)
+    Appendix E.5.
 
     Parameters
     ----------
@@ -759,7 +760,7 @@ def _get_group_sizes(n, m, percentile_method='R7'):
         Hyndman-Fan percentile rank method. Both produce roughly equal
         groups with slightly different handling of unequal-divisibility
         remainder observations. R7 is the default and matches the
-        draft's worked example in Table 23 (N=54 quartiles).
+        Standard's worked example in Table E.5.2 (N=54 quartiles).
 
     Returns
     -------
@@ -768,7 +769,7 @@ def _get_group_sizes(n, m, percentile_method='R7'):
 
     Notes
     -----
-    The draft Section E.3 defines (1-indexed):
+    The Standard's Appendix E.5 defines (1-indexed):
 
         R6:  h_i = floor(P_i / 100 * (N + 1))
         R7:  h_i = floor(P_i / 100 * (N - 1) + 1)
@@ -783,7 +784,7 @@ def _get_group_sizes(n, m, percentile_method='R7'):
     method_up = str(percentile_method).upper()
     if method_up not in ('R6', 'R7'):
         raise ValueError(f"Unknown percentile_method: {percentile_method!r}; expected 'R6' or 'R7'.")
-    # Per the draft Section E.3, an observation with 1-indexed position
+    # Per the Standard's Appendix E.5, an observation with 1-indexed position
     # ``k`` belongs to PG i iff ``h_{i-1} < k <= h_i``, where ``h_i`` is
     # computed from the boundary percentile P_i = 100*i/m:
     #   R6:  h_i = floor(P_i/100 * (N + 1))

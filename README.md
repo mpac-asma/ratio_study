@@ -6,12 +6,36 @@ It has been developed and is maintained by ASMA-DS: the Data Science team within
 This package provides a comprehensive suite of functions for evaluating Computer Assisted Mass Appraisal (CAMA) real estate valuation models.
 These functions comprise but are not limited to the International Association of Assessing Officers (IAAO)' Standard on Ratio Studies, as well as recent advances in this area.
 
+
+## Installation
+
+```bash
+pip install ratio_study                          # core
+pip install "ratio_study[spatial,ml,interactive]"  # maps, ML/SHAP diagnostics, Plotly charts
+```
+
+## Examples
+
+Five notebooks on the bundled anonymised sample dataset. No data preparation is needed.
+
+| Notebook | Covers |
+|---|---|
+| [01 Basics](examples/01_basics.ipynb) | Indicators, confidence intervals, compliance checks, stratification, IQR outlier filter, charts, model comparison |
+| [02 Spatial](examples/02_spatial.ipynb) | Ratio maps, Moran's I, hot/cold spots, VEM map (`spatial` extra) |
+| [03 Reporting](examples/03_reporting.ipynb) | Automated PDF / XLSX / CSV / PNG reports |
+| [04 Advanced diagnostics](examples/04_advanced_diagnostics.ipynb) | ML / SHAP inequity diagnostics (`ml` extra) and sales-chasing detection |
+| [05 Vertical equity](examples/05_vertical_equity.ipynb) | VEI, Vertical Equity Panel, VEM, Gini family |
+
+## Documentation
+
+See the [documentation index](docs/README.md): [getting started](docs/getting-started.md), [concepts](docs/concepts.md), the [API reference](docs/reference/README.md), and the [MCP server](docs/mcp-server.md) for driving the package from an AI assistant.
+
 ## Backend support (pandas / polars / pyarrow)
 
 The package is **backend-agnostic** thanks to [narwhals](https://github.com/narwhals-dev/narwhals).
 Public functions (`ratios`, `rts_calculator`, `asr_median`, `cod`, `prd`, `prb`,
 `rmse`, `mae`, `CoC`, `CoV_adj`, `vei_analysis`, `vem`,
-`gini_stats`, `gini_decomp`, `gini_factors`,
+`gini_stats`, `gini_decomp`, `gini_factors`, `bo_decompose`, `bo_multi_decomposition`,
 `compare_ratios`, etc.) accept any of the following:
 
 - `pandas.DataFrame` (default)
@@ -49,28 +73,14 @@ result = ratios(
 print(result.to_dicts())
 ```
 
-## Installation
+## Disclaimer
 
-```bash
-pip install ratio_study                          # core
-pip install "ratio_study[spatial,ml,interactive]"  # maps, ML/SHAP diagnostics, Plotly charts
-```
-
-## Examples
-
-Five notebooks on the bundled anonymised sample dataset. No data preparation is needed.
-
-| Notebook | Covers |
-|---|---|
-| [01 Basics](examples/01_basics.ipynb) | Indicators, confidence intervals, compliance checks, stratification, IQR outlier filter, charts, model comparison |
-| [02 Spatial](examples/02_spatial.ipynb) | Ratio maps, Moran's I, hot/cold spots, VEM map (`spatial` extra) |
-| [03 Reporting](examples/03_reporting.ipynb) | Automated PDF / XLSX / CSV / PNG reports |
-| [04 Advanced diagnostics](examples/04_advanced_diagnostics.ipynb) | ML / SHAP inequity diagnostics (`ml` extra) and sales-chasing detection |
-| [05 Vertical equity](examples/05_vertical_equity.ipynb) | VEI, Vertical Equity Panel, VEM, Gini family |
-
-## Documentation
-
-See the [documentation index](docs/README.md): [getting started](docs/getting-started.md), [concepts](docs/concepts.md), the [API reference](docs/reference/README.md), and the [MCP server](docs/mcp-server.md) for driving the package from an AI assistant.
+This package is provided free of charge, "as is", without warranty of any kind, express or implied, including but not limited to warranties of accuracy, fitness for a particular purpose, merchantability or non-infringement. 
+See the LICENSE (GPL-3.0-or-later) for the full terms.
+ 
+This package is not an official publication of, and is not endorsed by, the International Association of Assessing Officers (IAAO). 
+References to the IAAO Standard on Ratio Studies describe how the package interprets it; consult the Standard itself. 
+Sample data bundled with the package is anonymised and synthetic in its coordinates; it is for demonstration only.
 
 ## References
 IAAO's Standard on Ratio Studies available at https://www.iaao.org/media/standards/Standard_on_Ratio_Studies.pdf

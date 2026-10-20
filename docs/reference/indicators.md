@@ -525,7 +525,7 @@ float
 ## `rmse`
 
 ```python
-rmse(market_value, assessment, metric=<function mean at 0x108272cb0>, log=False, *,
+rmse(market_value, assessment, metric=<function mean at 0x10584e870>, log=False, *,
      weights=None)
 ```
 

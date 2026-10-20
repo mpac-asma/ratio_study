@@ -328,7 +328,7 @@ def _controls(panel):
 
 def test_map_panel_lays_out_controls_map_legend_and_status():
     panel = _panel()
-    assert [type(c).__name__ for c in panel.children] == ['HBox', 'Map', 'HBox', 'HTML']
+    assert [type(c).__name__ for c in panel.children] == ['HBox', 'Map', 'HBox', 'HTML', 'HTML']
     assert 'rs-map' in panel.children[1]._dom_classes
 
 
@@ -394,6 +394,33 @@ def test_open_map_in_browser_accepts_a_bare_map(tmp_path):
     out = tmp_path / 'bare.html'
     spatial.open_map_in_browser(lonboard.Map([]), filename=out, open_browser=False)
     assert out.exists()
+    assert 'id="rs-legend"' not in out.read_text()     # nothing to show, so no card
+
+
+def test_the_exported_page_carries_the_panels_legend(tmp_path):
+    panel = spatial.ratio_map(df=_ratio_map_df(), column='asr', groupby='nbhd',
+                              colour_code_by='standard')
+    out = spatial.open_map_in_browser(panel, filename=tmp_path / 'legend.html',
+                                      title='Ratio <map>', open_browser=False)
+    html = out.read_text()
+    assert html.count('id="rs-legend"') == 1
+    assert 'Ratio &lt;map&gt;' in html                  # escaped, not raw markup
+    legend = html[html.index('id="rs-legend"'):]
+    for button in panel.children[2].children:
+        assert button.description.replace('>', '&gt;').replace('<', '&lt;') in legend
+        assert button.style.button_color in legend
+
+
+def test_the_browser_button_exports_the_legend_too(tmp_path, monkeypatch):
+    opened = []
+    monkeypatch.setattr('webbrowser.open', lambda url: opened.append(url) or True)
+    df = _grid_df(n_side=8).rename(columns={'gradient': 'asr'})
+    panel = spatial.local_moran(df=df, ratio='asr')
+    _controls(panel)['Open in browser'].click()
+    from pathlib import Path
+    from urllib.parse import unquote, urlparse
+    html = Path(unquote(urlparse(opened[0]).path)).read_text()
+    assert 'hotspot 99% confidence' in html[html.index('id="rs-legend"'):]
 
 
 def test_open_map_in_browser_rejects_something_that_is_not_a_map():
@@ -445,7 +472,7 @@ def _legend(panel):
 def test_vem_map_returns_the_standard_panel():
     panel = spatial.vem_map(df=_vem_sales(), assessment_header='assessment_value_new',
                             market_value_header='time_adjusted_sale_price', quantiles=10)
-    assert [type(c).__name__ for c in panel.children] == ['HBox', 'Map', 'HBox', 'HTML']
+    assert [type(c).__name__ for c in panel.children] == ['HBox', 'Map', 'HBox', 'HTML', 'HTML']
     assert 'rs-map-panel' in panel._dom_classes
 
 
@@ -607,7 +634,7 @@ def test_a_cluster_of_high_ratios_is_a_hotspot():
     df, high, low = _moran_cluster_df()
     table = spatial.local_moran(df=df, ratio='asr').children[1].layers[0].table
     flags = np.array(table.column('flag').to_pylist())
-    z = np.array(table.column('Z_Value').to_pylist())
+    z = np.array(table.column('Z_Value').to_pylist(), dtype=float)
 
     assert z[high].mean() > 0
     assert all('hotspot' in flag for flag in flags[high])
@@ -620,8 +647,9 @@ def test_the_mapped_category_matches_the_classifier():
     df, _high, _low = _moran_cluster_df()
     table = spatial.local_moran(df=df, ratio='asr').children[1].layers[0].table
     codes = table.column('category').to_pylist()
-    z = table.column('Z_Value').to_pylist()
-    pvals = table.column('P_Value').to_pylist()
+    # The pane shows the statistics as text rounded to two decimals.
+    z = [float(v) for v in table.column('Z_Value').to_pylist()]
+    pvals = [float(v) for v in table.column('P_Value').to_pylist()]
     assert codes == [spatial._moran_class(a, b) for a, b in zip(z, pvals)]
 
 
@@ -630,7 +658,7 @@ def test_the_doubled_p_value_stays_a_probability():
     # push the reported P_Value past 1.
     df, _high, _low = _moran_cluster_df()
     table = spatial.local_moran(df=df, ratio='asr').children[1].layers[0].table
-    pvals = np.array(table.column('P_Value').to_pylist())
+    pvals = np.array(table.column('P_Value').to_pylist(), dtype=float)
     assert ((pvals >= 0) & (pvals <= 1)).all()
 
 
@@ -712,7 +740,7 @@ def test_local_moran_takes_the_dot_size_and_opacity_arguments():
     # returns the standard panel.
     df = _grid_df(n_side=8).rename(columns={'gradient': 'asr'})
     panel = spatial.local_moran(df=df, ratio='asr', dot_size=12, opacity=0.25)
-    assert [type(c).__name__ for c in panel.children] == ['HBox', 'Map', 'HBox', 'HTML']
+    assert [type(c).__name__ for c in panel.children] == ['HBox', 'Map', 'HBox', 'HTML', 'HTML']
     layer = panel.children[1].layers[0]
     assert layer.radius_scale == 12
     assert layer.opacity == pytest.approx(0.25)
@@ -776,7 +804,7 @@ def _ratio_map_df():
 
 def test_ratio_map_returns_the_standard_panel():
     panel = spatial.ratio_map(df=_ratio_map_df(), column='asr', groupby='nbhd')
-    assert [type(c).__name__ for c in panel.children] == ['HBox', 'Map', 'HBox', 'HTML']
+    assert [type(c).__name__ for c in panel.children] == ['HBox', 'Map', 'HBox', 'HTML', 'HTML']
     assert 'rs-map-panel' in panel._dom_classes
 
 
@@ -789,6 +817,26 @@ def test_ratio_map_draws_every_point_as_a_circle():
                                   groupby='nbhd', colour_code_by=scheme)
         layer_types = {type(layer).__name__ for layer in panel.children[1].layers}
         assert layer_types == {'ScatterplotLayer'}, scheme
+
+
+def _popup_names(panel):
+    return {c for layer in panel.children[1].layers for c in layer.table.column_names}
+
+
+def test_popup_labels_name_the_statistic_and_the_column():
+    names = _popup_names(spatial.ratio_map(
+        df=_ratio_map_df(), column='asr', groupby='nbhd'))
+    assert {'median of asr', 'mean of asr', 'min of asr', 'max of asr'} <= names
+    assert 'median' not in names
+
+
+def test_popup_shows_bare_column_without_effective_grouping():
+    df = _ratio_map_df()
+    df['pid'] = range(len(df))
+    for kwargs in ({}, {'groupby': 'pid'}):
+        names = _popup_names(spatial.ratio_map(df=df, column='asr', **kwargs))
+        assert 'asr' in names, kwargs
+        assert not any(n.endswith(' of asr') for n in names), kwargs
 
 
 def test_quantile_scheme_keeps_the_fixed_outlier_tails_in_its_legend():
@@ -894,6 +942,76 @@ def test_ratio_map_opacity_reaches_every_layer():
     default = spatial.ratio_map(df=_ratio_map_df(), column='asr', groupby='nbhd')
     defaults = [layer.opacity for layer in default.children[1].layers]
     assert defaults == [pytest.approx(spatial.DEFAULT_DOT_OPACITY)] * len(defaults)
+
+
+def _radii(layer):
+    return np.asarray(layer.get_radius, dtype=float)
+
+
+def test_edge_radius_grows_linearly_from_the_centre_to_the_edge():
+    radii = spatial._edge_radius([0, 0.5, 1, np.nan], 2.0)
+    assert radii.tolist() == pytest.approx([1.0, 1.5, 2.0, 1.0])
+    assert spatial._edge_radius([0, 1], 1).tolist() == [1.0, 1.0]
+
+
+@pytest.mark.parametrize('bad', [0, -2, np.inf, 'big', None])
+def test_ratio_map_rejects_an_impossible_edge_dot_scale(bad):
+    with pytest.raises(ValueError, match='edge_dot_scale'):
+        spatial.ratio_map(df=_ratio_map_df(), column='asr', groupby='nbhd',
+                          edge_dot_scale=bad)
+
+
+def test_ratio_map_draws_the_far_tails_larger():
+    # Group medians 0.70 / 1.00 / 1.50 against a median of 1.00: A and C sit
+    # past the 25 % outer band, B is central and drawn underneath.
+    panel = spatial.ratio_map(df=_ratio_map_df(), column='asr', groupby='nbhd',
+                              colour_code_by='standard')
+    background, foreground = panel.children[1].layers
+    assert _radii(background).tolist() == [1.0]
+    assert _radii(foreground).tolist() == [spatial.DEFAULT_EDGE_DOT_SCALE] * 2
+
+    flat = spatial.ratio_map(df=_ratio_map_df(), column='asr', groupby='nbhd',
+                             colour_code_by='standard', edge_dot_scale=1)
+    assert {r for layer in flat.children[1].layers for r in _radii(layer)} == {1.0}
+
+
+def test_ratio_map_drifting_ring_is_drawn_halfway():
+    df = pd.DataFrame({
+        'latitude': [40.00, 40.01, 40.02, 40.03, 40.04],
+        'longitude': [-75.00, -75.01, -75.02, -75.03, -75.04],
+        'asr': [0.70, 0.85, 1.00, 1.15, 1.50],
+    })
+    layers = spatial.ratio_map(df=df, column='asr', colour_code_by='standard',
+                               edge_dot_scale=3).children[1].layers
+    radii = sorted(r for layer in layers for r in _radii(layer))
+    assert radii == pytest.approx([1.0, 2.0, 2.0, 3.0, 3.0])
+
+
+def test_ratio_map_quantile_tails_outsize_the_graded_bins():
+    layers = spatial.ratio_map(df=_ratio_map_df(), column='asr', groupby='nbhd',
+                               colour_code_by='quantile').children[1].layers
+    graded, tails = layers
+    assert _radii(tails).tolist() == [spatial.DEFAULT_EDGE_DOT_SCALE] * 2
+    assert max(_radii(graded)) < spatial.DEFAULT_EDGE_DOT_SCALE
+
+
+def test_vem_map_draws_out_of_band_sales_larger():
+    panel = spatial.vem_map(df=_vem_sales(), market_value_header='time_adjusted_sale_price',
+                            asr_col='asr', quantiles=20, acceptable_inequity_level=0.02,
+                            edge_dot_scale=3)
+    layer = panel.children[1].layers[0]
+    flags = np.abs(np.array(layer.table.column('vem_flag').to_pylist()))
+    assert flags.any() and not flags.all()       # both sizes are exercised
+    assert _radii(layer).tolist() == pytest.approx((1 + 2 * flags).tolist())
+
+
+def test_local_moran_sizes_dots_by_significance():
+    df = _grid_df(n_side=8).rename(columns={'gradient': 'asr'})
+    layer = spatial.local_moran(df=df, ratio='asr', edge_dot_scale=4).children[1].layers[0]
+    codes = np.array(layer.table.column('category').to_pylist())
+    expected = np.where(codes == spatial.MORAN_UNCLASSIFIED, 1.0,
+                        1 + np.abs(codes - spatial.MORAN_NOT_SIGNIFICANT))
+    assert _radii(layer).tolist() == pytest.approx(expected.tolist())
 
 
 def test_opacity_may_be_given_as_a_percentage():

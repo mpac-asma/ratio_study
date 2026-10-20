@@ -8,7 +8,7 @@ import math
 from ratio_study.helpers import _simple_regression, _ols_slope, _get_group_sizes, _determine_num_groups
 from ratio_study.graphs import vei_boxplot, ve_scat_median_plot
 from ratio_study.confint import (compute_median_ci, log_median_diff_ci,
-                                 confidence_level_as_fraction)
+                                 confidence_level_as_fraction, moving_median_ci)
 from . import nw_utils, _optional
 import warnings
 
@@ -1382,16 +1382,12 @@ def _compute_moving_median(
             lowers.extend([ci["lower"]] * n)
             uppers.extend([ci["upper"]] * n)
     else:
-        hw = window_size // 2
-        asr_vals = nw_utils.to_numpy_1d(data[asr_col])
-        total = len(asr_vals)
-        for i in range(total):
-            lo_idx = max(0, i - hw)
-            hi_idx = min(total, i + hw + 1)
-            ci = compute_median_ci(asr_vals[lo_idx:hi_idx], conf_level, method=ci_method)
-            medians.append(ci["median"])
-            lowers.append(ci["lower"])
-            uppers.append(ci["upper"])
+        # Same windows as a per-row `compute_median_ci` loop, and the same
+        # results, but the full-width windows are read in one vectorised
+        # pass -- this runs on every bootstrap resample of the VEM.
+        medians, lowers, uppers = moving_median_ci(
+            nw_utils.to_numpy_1d(data[asr_col]), window_size // 2,
+            conf_level, method=ci_method)
 
     data["moving_median"] = medians
     data["median_ci_lower"] = lowers

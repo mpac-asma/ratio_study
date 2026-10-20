@@ -297,13 +297,17 @@ def test_vei_analysis_reports_a_cod_per_percentile_group(ve_df):
 # --------------------------------------------------------------------------
 
 def test_panel_returns_figure_with_expected_axes(ve_df):
-    fig = vertical_equity_panel(ve_df, "assess", "sale", show=False)
-    try:
-        # four gauges, the secondary-indicator strip, then the VEI and VEM charts
-        assert len(fig.axes) == 7
-        assert [ax.get_label() for ax in fig.axes].count('secondary_indicators') == 1
-    finally:
-        plt.close(fig)
+    # By default (include_vem=False): three gauges, the secondary-indicator
+    # strip, then the VEI and moving-median charts. The VEM verdict adds a
+    # fourth gauge.
+    for include_vem, expected in ((False, 6), (True, 7)):
+        fig = vertical_equity_panel(ve_df, "assess", "sale", show=False,
+                                    include_vem=include_vem)
+        try:
+            assert len(fig.axes) == expected
+            assert [ax.get_label() for ax in fig.axes].count('secondary_indicators') == 1
+        finally:
+            plt.close(fig)
 
 
 def test_panel_is_laid_out_in_letter_proportions(ve_df):
@@ -351,7 +355,8 @@ def test_panel_saves_png_and_appends_extension(ve_df, tmp_path):
 
 def test_panel_survives_a_sample_too_small_for_vei_and_vem(ve_df):
     """Below the VEI (20) and VEM (30) minimums the panel still renders."""
-    fig = vertical_equity_panel(ve_df.head(18), "assess", "sale", show=False)
+    fig = vertical_equity_panel(ve_df.head(18), "assess", "sale", show=False,
+                                include_vem=True)
     try:
         assert len(fig.axes) == 7
     finally:
@@ -373,7 +378,8 @@ def test_panel_rejects_unknown_columns(ve_df):
 
 def test_panel_vem_chart_is_centred_on_the_median_asr(ve_df):
     """The VEM axes read in ASR units, not as offsets from zero."""
-    fig = vertical_equity_panel(ve_df, "assess", "sale", show=False)
+    fig = vertical_equity_panel(ve_df, "assess", "sale", show=False,
+                                include_vem=True)
     try:
         vem_ax = fig.axes[-1]         # gauges, strip, VEI, then VEM last
         center = float(np.median(ve_df["assess"] / ve_df["sale"]))
@@ -627,7 +633,8 @@ def test_gauges_sit_above_the_charts_with_room_for_the_title(ve_df):
 
 
 def test_include_vem_false_drops_the_vem_gauge_and_recentres_the_rest(ve_df):
-    with_vem = vertical_equity_panel(ve_df, "assess", "sale", show=False)
+    with_vem = vertical_equity_panel(ve_df, "assess", "sale", show=False,
+                                     include_vem=True)
     without_vem = vertical_equity_panel(ve_df, "assess", "sale", show=False,
                                         include_vem=False)
     try:
@@ -642,6 +649,15 @@ def test_include_vem_false_drops_the_vem_gauge_and_recentres_the_rest(ve_df):
     finally:
         plt.close(with_vem)
         plt.close(without_vem)
+
+
+def test_include_vem_is_off_by_default(ve_df):
+    fig = vertical_equity_panel(ve_df, "assess", "sale", show=False)
+    try:
+        assert len(_gauge_axes(fig)) == 3
+        assert fig.axes[-1].get_title() == "Moving Median of ASR"
+    finally:
+        plt.close(fig)
 
 
 def test_include_vem_false_strips_the_verdict_from_the_vem_chart(ve_df):
@@ -789,7 +805,8 @@ def test_the_smoothing_label_names_the_window_or_the_quantiles():
 
 
 def test_the_panel_titles_both_charts_from_the_results(ve_df):
-    fig = vertical_equity_panel(ve_df, "assess", "sale", show=False)
+    fig = vertical_equity_panel(ve_df, "assess", "sale", show=False,
+                                include_vem=True)
     try:
         assert fig.axes[-2].get_title().startswith("Vertical Equity Indicator: ")
         assert fig.axes[-1].get_title().startswith("Vertical Equity: ")

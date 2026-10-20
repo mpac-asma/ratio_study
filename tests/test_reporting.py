@@ -98,8 +98,9 @@ def test_standard_band_gives_strata_more_latitude():
     assert _standard_band((0.05, 0.15), 'CoD', False) == (0.05, 0.15)
     # A stratum CoD gets 5 more points.
     assert _standard_band((0.05, 0.15), 'CoD', True) == (0.05, 0.2)
-    # A stratum median is compared with the overall level of assessment.
-    assert _standard_band((0.9, 1.1), 'Median', True, overall_median=1.02) == (0.97, 1.07)
+    # A stratum median is compared with the overall level of assessment,
+    # +/- 5 percent of it -- not 5 points: (0.969, 1.071), not (0.97, 1.07).
+    assert _standard_band((0.9, 1.1), 'Median', True, overall_median=1.02) == (0.969, 1.071)
     # ... unless that comparison is turned off, or there is no overall row.
     assert _standard_band((0.9, 1.1), 'Median', True, overall_median=1.02,
                           compare_groups_median_to_overall_median=False) == (0.9, 1.15)
@@ -305,13 +306,23 @@ def test_a_stratum_median_is_checked_against_the_overall_median():
     rows = [row(), row(Level='nbhd', Group='A', Median=1.20)]
     out = run(rows)
     assert comment(out, 0) == ''
-    assert 'Median suggests a review regarding assessment standards (0.95, 1.05)' in comment(out, 1)
+    assert 'Median suggests a review under IAAO 11.2.1' in comment(out, 1)
+    assert '20.0% different' in comment(out, 1)
 
     # Inside +/- 5% of the overall median but outside the fixed band.
     rows = [row(Median=1.15), row(Level='nbhd', Group='A', Median=1.13)]
     out = run(rows)
     assert 'Median suggests' in comment(out, 0)          # 1.15 breaches (0.9, 1.1)
-    assert comment(out, 1) == ''                         # 1.13 is within 1.15 +/- 0.05
+    assert comment(out, 1) == ''                         # 1.13 is within 5% of 1.15
+
+
+def test_the_stratum_limit_is_five_percent_not_five_points():
+    # Overall 0.80: 5 percent is 0.04, so 0.845 (5.6% above) fails even
+    # though it is within 5 points.
+    rows = [row(Median=0.80), row(Level='nbhd', Group='A', Median=0.845)]
+    assert 'IAAO 11.2.1' in comment(run(rows), 1)
+    rows = [row(Median=0.80), row(Level='nbhd', Group='A', Median=0.835)]
+    assert comment(run(rows), 1) == ''                   # 4.4% above
 
 
 def test_a_stratum_median_ci_uses_the_iaao_percent_change_test():
@@ -562,3 +573,72 @@ def test_compare_ratios_takes_unmarked_numeric_prb_too():
 def test_compare_ratios_leaves_an_unreadable_prb_out_of_the_diff():
     out = compare_ratios(*two_tables('n/a', '-0.1000*'))
     assert out.loc[0, 'PRB_diff'] == '-'
+
+
+# --------------------------------------------------------------------------
+# Choosing the level of assessment, and switching the checks off
+# --------------------------------------------------------------------------
+
+LEVEL_COLS = COLS + ['Mean', 'Mean_ci', 'Weighted_Mean', 'Weighted_Mean_ci']
+
+
+def level_row(**overrides):
+    base = dict(Mean=1.00, Mean_ci=(0.98, 1.02),
+                Weighted_Mean=1.00, Weighted_Mean_ci=(0.98, 1.02))
+    base.update(overrides)
+    return row(**base)
+
+
+@pytest.mark.parametrize("stat", ['Mean', 'Weighted_Mean'])
+def test_the_level_of_assessment_can_be_the_mean_or_weighted_mean(stat):
+    # The stratum's Median matches the overall; only `stat` is far off.
+    rows = [level_row(),
+            level_row(Level='nbhd', Group='A', **{stat: 1.20, f'{stat}_ci': (1.15, 1.25)})]
+    out = run(rows, cols=LEVEL_COLS, level_of_assessment=stat)
+    assert f"{stat.replace('_', ' ')} suggests a review under IAAO 11.2.1" in comment(out, 1)
+    assert out.loc[1, stat].endswith(NOT_ACCEPTABLE)
+    # Judged on the Median instead, the same stratum passes.
+    assert 'IAAO 11.2.1' not in comment(run(rows, cols=LEVEL_COLS), 1)
+
+
+def test_the_interclass_check_uses_the_chosen_statistic():
+    rows = [level_row(Level='nbhd', Group='A', Weighted_Mean=1.30, Weighted_Mean_ci=(1.25, 1.35)),
+            level_row(Level='nbhd', Group='B', Weighted_Mean=1.00, Weighted_Mean_ci=(0.95, 1.05))]
+    out = run(rows, cols=LEVEL_COLS, level_of_assessment='weighted mean')
+    assert 'Weighted Mean (level of assessment) does not pass IAAO 11.2.2' in comment(out, 0)
+    assert 'IAAO 11.2.2' not in comment(run(rows, cols=LEVEL_COLS), 0)   # Medians agree
+
+
+def test_the_median_is_the_default_and_the_fallback_follows_the_table():
+    from ratio_study.reporting import _resolve_level_of_assessment
+    assert _resolve_level_of_assessment(['Median', 'Mean', 'Weighted_Mean']) == 'Median'
+    assert _resolve_level_of_assessment(['Mean', 'Weighted_Mean']) == 'Weighted_Mean'
+    assert _resolve_level_of_assessment(['Mean']) == 'Mean'
+    assert _resolve_level_of_assessment(['CoD']) is None
+    # A named statistic the table lacks switches the checks off.
+    assert _resolve_level_of_assessment(['Median'], 'Mean') is None
+
+
+def test_an_unknown_level_of_assessment_is_rejected():
+    from ratio_study.reporting import normalize_level_of_assessment
+    with pytest.raises(ValueError):
+        normalize_level_of_assessment('mode')
+
+
+def test_the_strata_checks_can_be_switched_off():
+    cols = COLS + ['Median_ci']
+    rows = [row(Median=1.01, Median_ci=(0.98, 1.05)),
+            row(Level='nbhd', Group='A', Median=1.30, Median_ci=(1.25, 1.35)),
+            row(Level='nbhd', Group='B', Median=1.00, Median_ci=(0.95, 1.05))]
+    out = run(rows, cols=cols, strata_uniformity_checks=False)
+    assert 'IAAO 11.2' not in comment(out, 1) + comment(out, 2)
+
+
+def test_a_blank_interval_is_not_read_as_a_failure():
+    # (nan, nan) is a tuple; a NaN gap must not be reported as "nan% different".
+    cols = COLS + ['Median_ci']
+    nan = float('nan')
+    rows = [row(Level='nbhd', Group='A', Median=1.30, Median_ci=(nan, nan)),
+            row(Level='nbhd', Group='B', Median=1.00, Median_ci=(0.95, 1.05))]
+    out = run(rows, cols=cols)
+    assert 'IAAO 11.2.2' not in comment(out, 0) + comment(out, 1)

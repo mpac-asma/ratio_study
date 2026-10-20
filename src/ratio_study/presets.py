@@ -84,7 +84,7 @@ class BootstrapConfig(BaseModel):
         cost is per group, so it is opted into.
     ci_mode : {"bootstrap", "distribution"}
         Which family of interval to build.  ``"distribution"`` (the
-        default) uses the closed-form formulas of the IAAO Exposure Draft
+        default) uses the closed-form formulas of the IAAO Standard on Ratio Studies
         Appendix D for ``Median``, ``Mean``, ``Weighted_Mean`` and
         ``CoD``, plus ``PRB``'s own slope-regression interval and a
         delta-method interval for ``PRD`` (the ratio of ``Mean`` to

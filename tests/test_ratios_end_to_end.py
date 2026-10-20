@@ -39,8 +39,11 @@ DEFAULT_COLUMNS = [
     "PRB", "PRB_ci",
     "PRD", "PRD_ci",
     "VEI", "VEI_conclusion", "VEI_kw_statistic", "VEI_kw_pvalue",
-    "Inequity_conclusion", "Inequity_severity", "Inequity_prevalence",
 ]
+
+# VEM left the defaults (it is opt-in); tests of its verdict ask for it.
+VEM_COLUMNS = ["Inequity_conclusion", "Inequity_severity", "Inequity_prevalence"]
+WITH_VEM = ['Median', 'Mean', 'Weighted_Mean', 'CoD', 'PRD', 'PRB', 'VEI', 'VEM']
 
 # The bootstrap resampler is unseeded, so the `*_ci` columns vary run to run
 # (see test_bootstrap_confidence_intervals_are_not_reproducible). Point
@@ -91,13 +94,17 @@ def test_returns_one_overall_row_with_the_default_columns(sales):
     assert int(out.loc[0, "Count"]) == N
 
 
-def test_vem_is_in_the_default_indicator_set(sales):
-    # 'VEM' joined the defaults when ve_bands was removed; the three
-    # Inequity_* columns are its output.
-    out = ratios(input_df=sales, market_value_header="sale",
-                 assessment_header="assess")
-    for col in ("Inequity_conclusion", "Inequity_severity", "Inequity_prevalence"):
-        assert col in out.columns
+def test_vem_is_opt_in(sales):
+    # 'VEM' joined the defaults when ve_bands was removed and left them
+    # again: it is the slowest indicator and has no IAAO standard, so the
+    # three Inequity_* columns appear only when it is asked for.
+    default = ratios(input_df=sales, market_value_header="sale",
+                     assessment_header="assess")
+    assert not set(VEM_COLUMNS) & set(default.columns)
+    asked = ratios(input_df=sales, market_value_header="sale",
+                   assessment_header="assess", indicators=WITH_VEM)
+    for col in VEM_COLUMNS:
+        assert col in asked.columns
 
 
 def test_no_ve_bands_columns_survive(sales):
@@ -143,13 +150,82 @@ def test_group_counts_sum_to_the_population(sales):
     assert group_rows["Count"].astype(int).sum() == N
 
 
+def test_missing_group_values_form_a_missing_group_listed_last(sales):
+    # A NaN label never equals itself, so these sales used to drop out of
+    # every group and leave a zero-count row behind.
+    df = sales.copy()
+    df.loc[:49, "nbhd"] = np.nan
+    out = ratios(input_df=df, market_value_header="sale",
+                 assessment_header="assess", group_by="nbhd")
+    group_rows = out[out["Level"] == "nbhd"]
+    assert group_rows["Count"].astype(int).sum() == N
+    assert group_rows["Group"].iloc[-1] == "Missing"
+    assert int(group_rows["Count"].iloc[-1]) == 50
+    assert not group_rows["Group"].astype(str).str.contains("nan").any()
+
+
+def test_nested_groups_label_missing_values_as_missing(sales):
+    df = sales.copy()
+    df["zone"] = np.where(np.arange(N) % 2, "R1", "R2")
+    df.loc[:49, "zone"] = np.nan
+    out = ratios(input_df=df, market_value_header="sale",
+                 assessment_header="assess", group_by=[["nbhd", "zone"]])
+    groups = out.loc[out["Level"] == "nbhd, zone", "Group"].astype(str)
+    assert groups.str.endswith(", Missing").any()
+    assert not groups.str.contains("nan").any()
+
+
+def test_mixed_type_group_labels_do_not_abort_the_study(sales):
+    df = sales.copy()
+    df["mixed"] = [1 if i % 2 else "x" for i in range(N)]
+    out = ratios(input_df=df, market_value_header="sale",
+                 assessment_header="assess", group_by="mixed")
+    assert isinstance(out, pd.DataFrame)
+    assert set(out.loc[out["Level"] == "mixed", "Group"]) == {1, "x"}
+
+
+def test_input_that_cleans_to_nothing_explains_each_cause(sales, tmp_path):
+    df = sales.copy()
+    df.loc[:9, "assess"] = np.nan
+    df.loc[10:, "assess"] = -1.0
+    with pytest.warns(UserWarning, match="none of the 600 sales"):
+        out = ratios(input_df=df, market_value_header="sale",
+                     assessment_header="assess", group_by="nbhd",
+                     export_directory=tmp_path)
+    message = out["errors"][1][-1]
+    assert "10 sales: assessment_header='assess' is empty" in message
+    assert f"{N - 10} sales: assessment_header='assess' is zero or negative" in message
+    # Causes that removed nothing are left out.
+    assert "market_value_header" not in message.split("why:")[1]
+
+
+def test_non_numeric_values_are_named_with_their_argument(sales, tmp_path):
+    df = sales.astype({"sale": object})
+    df.loc[:, "sale"] = "$350,000"
+    with pytest.warns(UserWarning):
+        out = ratios(input_df=df, market_value_header="sale",
+                     assessment_header="assess",
+                     export_directory=tmp_path)
+    message = out["errors"][1][-1]
+    assert f"{N} sales: market_value_header='sale' is not a number" in message
+    assert "'$350,000'" in message
+
+
+def test_numbers_stored_as_text_are_used(sales):
+    # They pass the numeric check, and used to fail the > 0 comparison with
+    # "'<=' not supported between instances of 'str' and 'int'".
+    out = ratios(input_df=sales.astype(str), market_value_header="sale",
+                 assessment_header="assess")
+    assert int(out.loc[0, "Count"]) == N
+
+
 # --------------------------------------------------------------------------
 # Detecting real inequity
 # --------------------------------------------------------------------------
 
 def test_a_regressive_sample_is_flagged_as_regressive(regressive_sales):
     out = ratios(input_df=regressive_sales, market_value_header="sale",
-                 assessment_header="assess")
+                 assessment_header="assess", indicators=WITH_VEM)
     conclusion = str(out.loc[0, "Inequity_conclusion"])
     prd = float(out.loc[0, "PRD"])
     # Ratios fall with price: PRD above 1 is the classic regressivity signal.
@@ -159,7 +235,7 @@ def test_a_regressive_sample_is_flagged_as_regressive(regressive_sales):
 
 def test_a_uniform_sample_is_not_flagged(sales):
     out = ratios(input_df=sales, market_value_header="sale",
-                 assessment_header="assess")
+                 assessment_header="assess", indicators=WITH_VEM)
     assert str(out.loc[0, "Inequity_conclusion"]).lower() == "acceptable"
 
 
@@ -588,15 +664,34 @@ def test_a_list_of_indicators_means_overall_cis_for_those(sales):
     assert _ci_cols(out) == ["Median_ci", "CoD_ci"]
 
 
-def test_ci_indicators_drops_the_ones_the_study_does_not_compute(sales):
-    # Bootstrap mode, deliberately: PRD is supported by the bootstrap, so
-    # this exercises the "the study itself does not compute it" check
-    # rather than the mode-support check `test_distribution_mode_reports_
-    # indicators_it_cannot_cover` already covers for distribution mode.
-    with pytest.warns(UserWarning, match="does not compute"):
+@pytest.mark.parametrize("mode", ["bootstrap", "distribution"])
+def test_ci_indicators_add_the_ones_the_study_does_not_compute(sales, mode):
+    # Asking for an interval by name asks for the indicator too: PRD is added
+    # to the study, in either mode, rather than being dropped with an
+    # "input error" warning as the bootstrap used to.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
         out = _ci(sales, indicators=["Median", "CoD"],
-                  ci_indicators=["Median", "PRD"], ci_mode="bootstrap")
+                  ci_indicators=["Median", "PRD"], ci_mode=mode)
+    assert "PRD" in out.columns
+    assert _ci_cols(out) == ["Median_ci", "PRD_ci"]
+
+
+def test_an_indicator_without_an_interval_in_this_mode_is_still_added(sales):
+    # Distribution mode has no closed form for the RRI: the indicator is
+    # computed, and only the interval is reported as unavailable.
+    with pytest.warns(UserWarning, match="no distribution-based confidence interval"):
+        out = _ci(sales, indicators=["Median"], ci_indicators=["Median", "RRI"],
+                  ci_mode="distribution")
+    assert "RRI" in out.columns
     assert _ci_cols(out) == ["Median_ci"]
+
+
+def test_a_name_that_is_not_an_indicator_is_not_added(sales):
+    with pytest.warns(UserWarning, match="no bootstrap confidence interval"):
+        out = _ci(sales, indicators=["Median"], ci_indicators=["Median", "Nonsense"],
+                  ci_mode="bootstrap")
+    assert "Nonsense" not in out.columns
 
 
 def test_the_default_ci_indicators_narrow_silently_with_the_study(sales):
@@ -1383,3 +1478,65 @@ def test_an_out_of_range_share_is_rejected_by_ratios(regressive_sales):
         ratios(input_df=regressive_sales, market_value_header="sale",
                assessment_header="assess", mvp_sale_price_share=-1,
                print_ci_settings=False)
+
+
+# --------------------------------------------------------------------------
+# Horizontal equity between strata (IAAO 11.2.1 / 11.2.2)
+# --------------------------------------------------------------------------
+
+COMMENTS_COL = "Comments Ratio Study Standard metrics"
+
+
+@pytest.fixture
+def uneven_strata(sales):
+    """Neighbourhood C assessed 20% high: fails 11.2.1 on any level statistic."""
+    out = sales.copy()
+    out.loc[out["nbhd"] == "C", "assess"] *= 1.20
+    return out
+
+
+def _strata_comments(frame):
+    return dict(zip(frame["Group"], frame[COMMENTS_COL].astype(str)))
+
+
+@pytest.mark.parametrize("stat", [None, "Median", "Mean", "Weighted_Mean"])
+def test_a_stratum_off_the_overall_level_is_flagged(uneven_strata, stat):
+    out = ratios(input_df=uneven_strata, market_value_header="sale",
+                 assessment_header="assess", group_by="nbhd", descriptive=True,
+                 level_of_assessment=stat, print_ci_settings=False)
+    comments = _strata_comments(out)
+    assert "IAAO 11.2.1" in comments["C"]
+    assert (stat or "Median").replace("_", " ") in comments["C"]
+
+
+def test_the_strata_checks_can_be_switched_off_in_ratios(uneven_strata):
+    out = ratios(input_df=uneven_strata, market_value_header="sale",
+                 assessment_header="assess", group_by="nbhd", descriptive=True,
+                 strata_uniformity_checks=False, print_ci_settings=False)
+    assert not out[COMMENTS_COL].astype(str).str.contains("IAAO 11.2").any()
+
+
+def test_a_named_level_statistic_is_added_to_the_indicators(uneven_strata):
+    out = ratios(input_df=uneven_strata, market_value_header="sale",
+                 assessment_header="assess", group_by="nbhd", descriptive=True,
+                 indicators=["CoD"], level_of_assessment="weighted mean",
+                 print_ci_settings=False)
+    assert "Weighted_Mean" in out.columns
+    assert "IAAO 11.2.1" in _strata_comments(out)["C"]
+
+
+def test_an_unknown_level_statistic_is_rejected(sales):
+    with pytest.raises(ValueError, match="level_of_assessment"):
+        ratios(input_df=sales, market_value_header="sale", assessment_header="assess",
+               descriptive=True, level_of_assessment="mode")
+
+
+def test_classes_differing_by_more_than_ten_percent_are_flagged(uneven_strata):
+    # 11.2.2 needs per-group intervals.
+    out = ratios(input_df=uneven_strata, market_value_header="sale",
+                 assessment_header="assess", group_by="nbhd", descriptive=True,
+                 bootstrap_args={"groups": True}, print_ci_settings=False)
+    comments = _strata_comments(out)
+    assert "IAAO 11.2.2" in comments["C"]
+    # Both sides of a failing pair are told which class they differ from.
+    assert any("Group 'C'" in comments[g] for g in ("A", "B"))

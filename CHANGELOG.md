@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.0.1]
 
 ### Fixed
 
@@ -20,8 +20,7 @@
   statistically insignificant" because significance required both
   |z| >= 2.58 and p <= 0.01 without saying so. The reading now judges
   the randomisation p-value at a stated 5 % level, reports magnitude
-  (negligible / low / moderate / high) and significance separately, and
-  drops the internal "contact your manager" wording for "Action required".
+  (negligible / low / moderate / high) and significance separately.
   The last printed line, mislabelled `z_norm`, is now `p_z_norm (one-sided)`.
 
 * **`vem` documentation.** The docstring listed the no-inequity conclusion
@@ -39,8 +38,7 @@
 * The example notebook is split into five (`examples/01_basics` to
   `05_vertical_equity`) and runs entirely on the bundled sample dataset.
   The sample's latitude/longitude are random placeholders, and the docs say
-  so. `docs/` is regenerated; `.gitlab-ci.yml`, `dist/` and `egg-info/` are
-  no longer tracked.
+  so. `docs/` is regenerated;
 
 ## [0.4.5] – 2026-09-14
 
@@ -373,7 +371,7 @@
   * `ci_mode='bootstrap'` (the default, so nothing moves) resamples, as
     before.
   * `ci_mode='distribution'` uses the closed-form formula the IAAO
-    Exposure Draft (May 2026) Appendix D prescribes for each indicator,
+    Standard on Ratio Studies (October 2026) Appendix D prescribes for each indicator,
     rather than one generic interval: Student's t about the mean (D.1),
     the large-sample rank formula for the median (D.2), the
     ratio-estimator standard error for the weighted mean (D.3), the exact
@@ -388,7 +386,7 @@
   of 20. `bootstrap_method`, `bootstrap_resamplings`,
   `bootstrap_concurrency` and `ci_seed` are ignored there.
 
-  The two worked examples the draft supplies are reproduced exactly and
+  The two worked examples the Standard supplies are reproduced exactly and
   pinned by tests: the D.4 median interval (n=17 at 95 % →
   `(0.6952, 0.9326)`) and the D.7.1 CoD interval (n=54 at 90 % →
   `(0.21878, 0.28618)`).
@@ -1082,7 +1080,7 @@
 
 * **`ci_mode` now defaults to `'distribution'` instead of `'bootstrap'`.**
   A plain `ratios()` call now builds `Median_ci` and `CoD_ci` from the
-  IAAO Exposure Draft's closed-form formulas rather than by resampling,
+  IAAO Standard on Ratio Studies's closed-form formulas rather than by resampling,
   and carries no minimum-sample gate. `PRD` and `PRB` do not have a
   distribution-mode formula, so their `_ci` columns are only populated
   under `ci_mode='bootstrap'`. Pass `ci_mode='bootstrap'` to keep the old

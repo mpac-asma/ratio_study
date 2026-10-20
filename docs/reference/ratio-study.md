@@ -29,7 +29,7 @@ ratios(input_df, assessment_header, market_value_header, mkt_value_proxy_header=
        req_significance=0.05, assessment_standards=None, graphs_args=None,
        discrete_variables=None, iqr_trim_multiple=0, iqr_log_transform=True,
        iqr_group_by=None, iqr_min_cod=0.06, iqr_filter_result='print', return_dict=False,
-       VE_bundle_comments=False)
+       VE_bundle_comments=False, strata_uniformity_checks=True, level_of_assessment=None)
 ```
 
 Compute a ratio study (assessed-to-market-value ratios) with optional
@@ -88,8 +88,7 @@ model_name : str, default 'model'
     Name used for output file names and chart titles.
 indicators : list of str, optional
     Indicators to compute. Defaults to
-    ``['Median', 'Mean', 'Weighted_Mean', 'CoD', 'PRD', 'PRB', 'VEI',
-    'VEM']``.
+    ``['Median', 'Mean', 'Weighted_Mean', 'CoD', 'PRD', 'PRB', 'VEI']``.
 gini_args : dict, optional
     Options for the Gini decomposition:
 
@@ -100,7 +99,7 @@ gini_args : dict, optional
       model variables to decompose the Gini coefficient by.
     * gini_lorenz_plots : bool, default False -- generate Lorenz curve plots.
 bo_args : dict, optional
-    Experimental; under testing and not yet documented. Leave unset.
+    Arguments for the Binder-Oaxaca decomposition.
 confidence_intervals_aggs : bool, str, list, or dict, default None
     Which bootstrap confidence intervals to compute. This is the
     shorthand for `bootstrap_args`, and it is applied last, so
@@ -128,7 +127,7 @@ ci_mode : {'bootstrap', 'distribution'}, default 'distribution'
       ``min_count_threshold`` sales (20 by default) before it will
       produce one.
     * ``'distribution'`` -- use the closed-form formula the IAAO
-      Exposure Draft (May 2026) Appendix D prescribes for each
+      Standard on Ratio Studies (October 2026) Appendix D prescribes for each
       indicator: Student's t about the mean (D.1), the rank formula
       for the median (D.2), the ratio-estimator standard error for the
       weighted mean (D.3), the binomial tables for a median on 30
@@ -167,9 +166,14 @@ ci_indicators : str or list of str, default None
     in distribution mode, intersected in both cases with
     `indicators`. Anything the mode cannot produce an interval for is
     dropped with a message. An indicator named here that the study
-    does not compute is added to `indicators` in distribution mode --
-    the closed forms are cheap -- and dropped with a message in
-    bootstrap mode.
+    does not compute is added to `indicators`, in either mode -- even
+    one the mode has no interval for, which is then computed without
+    one. In bootstrap mode `MKI` and `RRI` come out as
+    ``MKI_ci`` / ``RRI_ci``, `VEI` as ``VEI_ci``, and `VEM` as
+    ``Inequity_severity_ci`` and ``Inequity_prevalence_ci``. VEM is
+    by far the slowest to resample -- every draw recomputes a moving
+    median with a confidence band at each sale -- so expect it to
+    dominate the run time on large samples.
 ci_seed : int, default None
     Seed for the bootstrap resampler. Left unset, two identical runs
     publish slightly different intervals; set it when the numbers have
@@ -370,6 +374,21 @@ return_dict : bool, default False
     ratios DataFrame.
 VE_bundle_comments : bool, default False
     If True, bundle vertical equity descriptive comments together.
+strata_uniformity_checks : bool, default True
+    With `descriptive` and a `group_by`, check each stratum's level of
+    assessment against the overall level (IAAO 11.2.1, uniformity among
+    strata: within 5 percent -- not 5 percentage points) and against
+    every other stratum of the same grouping (IAAO 11.2.2, uniformity
+    between classes: not probably differing by more than 10 percent),
+    and comment on and mark the strata that fail. Confidence intervals
+    are compared at their nearest bounds where both sides have one;
+    11.2.1 falls back to the point estimates otherwise, while 11.2.2 is
+    only tested with intervals. False skips both checks.
+level_of_assessment : {'Median', 'Mean', 'Weighted_Mean'}, optional
+    Statistic used as the level of assessment in those checks. Default:
+    the Median when it is among `indicators`, else the Weighted Mean,
+    else the Mean. A statistic named here that `indicators` lacks is
+    added to it.
 
 Returns
 -------
@@ -422,7 +441,7 @@ ratios_report(sales_df, assessment_header, market_value_header,
               mkt_value_proxy_header=None, prb_mvp_header=None, mvp_sale_price_share=0.5,
               group_by=[], export_directory=Path.cwd(), return_dict_results=False,
               weights_header=None, descriptive=True, indicators=None, model_name='model',
-              export_filename_date_ref='', gini_args={}, bo_args={},
+              report_title=None, export_filename_date_ref='', gini_args={}, bo_args={},
               confidence_intervals_aggs=None, ci_mode='distribution', ci_conf_level=None,
               ci_indicators=None, ci_seed=None, bootstrap_args={},
               assessment_standards={}, export_ratios='', export_in_compacted_file='zip',
@@ -432,7 +451,8 @@ ratios_report(sales_df, assessment_header, market_value_header,
               vem_ci_method='binom', discrete_variables=[], iqr_trim_multiple=0,
               iqr_log_transform=True, iqr_group_by=None, iqr_min_cod=0.06,
               iqr_filter_result='print', print_ci_settings=True, return_dict=True,
-              VE_bundle_comments=False, excel_sensitivity_tag=None, site_id=None)
+              VE_bundle_comments=False, strata_uniformity_checks=True,
+              level_of_assessment=None, excel_sensitivity_tag=None, site_id=None)
 ```
 
 Run a ratio study on model results, with the option of generating
@@ -467,11 +487,14 @@ weights_header : str, optional
 descriptive : bool, default True
     If True, ratios are evaluated against `assessment_standards` and
     reported with asterisks and comments where applicable.
-indicators : list of str, default ['Median', 'Mean', 'Weighted_Mean', 'CoD', 'PRD', 'PRB', 'VEI', 'VEM']
+indicators : list of str, default ['Median', 'Mean', 'Weighted_Mean', 'CoD', 'PRD', 'PRB', 'VEI']
     Indicators to compute.
 model_name : str, default 'model'
     Model name. Used for naming exported files and adding a title to
     charts.
+report_title : str, optional
+    Overrides the default PDF report title (base date, "Sales Ratio
+    Study" and model name) with this exact text.
 export_filename_date_ref : str, default ''
     Date/time reference appended to exported file names. If not
     provided, the current date/time is used.
@@ -488,7 +511,31 @@ gini_args : dict, optional
     * gini_lorenz_plots : bool, default False -- generate Lorenz curve
       plots.
 bo_args : dict, optional
-    Experimental; under testing and not yet documented. Leave unset.
+    Options for the Blinder-Oaxaca decomposition, passed through to
+    `ratios`:
+
+    * run_bo : bool, default False -- run the decomposition.
+    * group_col : str, optional -- column identifying the two groups
+      being compared.
+    * characteristics : list of str, default [] -- explanatory
+      variables used in the decomposition.
+    * log_asr : bool, default True -- decompose the log of the ASR.
+    * reference : str, default 'sloczynski' -- reference weighting
+      scheme for the single decomposition.
+    * references : list of str, default ['group_0', 'group_1', 'sloczynski'] -- reference schemes used for the multi-model decomposition.
+    * threshold, group_high_label, group_low_label : optional --
+      used to derive the two groups from a continuous/threshold
+      variable.
+    * dummy_sets, detail_groups : optional -- groupings of dummy
+      variables for detailed decomposition results.
+    * alpha : float, default 0.05 -- significance level.
+    * stratify_by : optional -- column(s) to stratify the multi-model
+      decomposition by.
+    * bo_coefficient_plot, bo_decomposition_plot, bo_detail_plot :
+      bool, default True -- which Blinder-Oaxaca plots to generate.
+
+    If Blinder-Oaxaca results are produced, they're exported to a
+    dedicated Excel workbook alongside the ratios/Gini exports.
 confidence_intervals_aggs : bool, str, list, or dict, default None
     Which bootstrap confidence intervals to compute. This is the
     shorthand for `bootstrap_args`, and it is applied last, so
@@ -516,7 +563,7 @@ ci_mode : {'bootstrap', 'distribution'}, default 'distribution'
       ``min_count_threshold`` sales (20 by default) before it will
       produce one.
     * ``'distribution'`` -- use the closed-form formula the IAAO
-      Exposure Draft (May 2026) Appendix D prescribes for each
+      Standard on Ratio Studies (October 2026) Appendix D prescribes for each
       indicator: Student's t about the mean (D.1), the rank formula
       for the median (D.2), the ratio-estimator standard error for the
       weighted mean (D.3), the binomial tables for a median on 30
@@ -555,9 +602,14 @@ ci_indicators : str or list of str, default None
     in distribution mode, intersected in both cases with
     `indicators`. Anything the mode cannot produce an interval for is
     dropped with a message. An indicator named here that the study
-    does not compute is added to `indicators` in distribution mode --
-    the closed forms are cheap -- and dropped with a message in
-    bootstrap mode.
+    does not compute is added to `indicators`, in either mode -- even
+    one the mode has no interval for, which is then computed without
+    one. In bootstrap mode `MKI` and `RRI` come out as
+    ``MKI_ci`` / ``RRI_ci``, `VEI` as ``VEI_ci``, and `VEM` as
+    ``Inequity_severity_ci`` and ``Inequity_prevalence_ci``. VEM is
+    by far the slowest to resample -- every draw recomputes a moving
+    median with a confidence band at each sale -- so expect it to
+    dominate the run time on large samples.
 ci_seed : int, default None
     Seed for the bootstrap resampler. Left unset, two identical runs
     publish slightly different intervals; set it when the numbers have
@@ -670,6 +722,38 @@ pdf_args : dict, optional
       PDF page.
     * classification_header : str, optional -- classification header
       shown in the PDF.
+    * pdf_logo : str, Path or dict, optional -- add a logo to the report
+      pages. A path, or a dict with ``path``; ``pages`` (``'first'``,
+      the default, or ``'all'``); ``position`` (``'top_left'`` default,
+      ``'top_center'``, ``'top_right'``); ``max_height`` (80) and
+      ``max_width`` (300), in points. The image is scaled to fit,
+      never distorted. Off by default.
+    * pdf_watermark : str, Path or dict, optional -- add a watermark
+      behind the content of every report page. A path, or a dict with
+      ``path``; ``position`` (``'fill'`` default, ``'center'``,
+      ``'top_left'``, ``'top_right'``, ``'bottom_left'``,
+      ``'bottom_right'``); ``opacity`` (0 invisible to 1 opaque, default
+      0.15); ``scale`` (0.5, share of the page the image may take, except
+      for ``'fill'``). ``'fill'`` scales the image as large as the page
+      allows without distorting or cropping it. Off by default.
+    * pdf_page_numbers : bool or dict, optional -- number the pages. True,
+      or a dict with ``position`` (``'bottom_center'`` default,
+      ``'bottom_left'``, ``'bottom_right'``); ``font_size`` (9);
+      ``format`` (``'number'`` default, or ``'page_of_n'`` for
+      "Page 3 of 12"). Off by default.
+    * pdf_cover : bool, str or dict, optional -- add a cover page. A dict
+      with ``title`` (default: the report title; a bare string is
+      shorthand for it), ``subtitle``, ``authors`` (str or list),
+      ``date`` (str, date or datetime; default today) and ``logo`` (a
+      path or a dict with ``path``, ``max_height``, ``max_width``),
+      independent of ``pdf_logo``. The cover has no page number and no
+      watermark, and is not counted in the page numbers or the total.
+    * pdf_index : bool or dict, optional -- needs ``pdf_cover``. Add a
+      page after the cover with the title (``{'title': ...}`` to
+      override) and an index of the report's sections with page numbers.
+      Like the cover it is not numbered or counted, so the first report
+      page is page 1, which is what the index quotes. It carries the
+      watermark, and the logo when ``pages='all'``.
 generate_log : bool, default False
     If True, a log file is saved to `export_directory`.
 log_transform : bool, default False
@@ -735,6 +819,21 @@ return_dict : bool, default True
     Passed through to `ratios` as `return_dict`.
 VE_bundle_comments : bool, default False
     If True, bundle vertical equity descriptive comments together.
+strata_uniformity_checks : bool, default True
+    With `descriptive` and a `group_by`, check each stratum's level of
+    assessment against the overall level (IAAO 11.2.1, uniformity among
+    strata: within 5 percent -- not 5 percentage points) and against
+    every other stratum of the same grouping (IAAO 11.2.2, uniformity
+    between classes: not probably differing by more than 10 percent),
+    and comment on and mark the strata that fail. Confidence intervals
+    are compared at their nearest bounds where both sides have one;
+    11.2.1 falls back to the point estimates otherwise, while 11.2.2 is
+    only tested with intervals. False skips both checks.
+level_of_assessment : {'Median', 'Mean', 'Weighted_Mean'}, optional
+    Statistic used as the level of assessment in those checks. Default:
+    the Median when it is among `indicators`, else the Weighted Mean,
+    else the Mean. A statistic named here that `indicators` lacks is
+    added to it.
 excel_sensitivity_tag : str, optional
     Sensitivity label tag written as custom document properties (e.g.
     MSIP labels) on exported Excel workbooks. Requires `site_id` to
@@ -784,8 +883,9 @@ rts_calculator(input_df=None, sale_count=None, assessment_header=None,
                market_value_header=None, mkt_value_proxy_header=None,
                prb_mvp_header=None, mvp_sale_price_share=0.5, market_value_array=None,
                assessment_array=None, weights_header=None, weights_array=None,
-               asr_array=None, sale_error_array=None,
-               indicators=['Median', 'Mean', 'Weighted_Mean', 'CoD', 'PRD', 'PRB', 'VEI', 'VEM'],
+               asr_array=None, sale_error_array=None, mkt_value_proxy_array=None,
+               prb_mvp_array=None,
+               indicators=['Median', 'Mean', 'Weighted_Mean', 'CoD', 'PRD', 'PRB', 'VEI'],
                req_significance=0.05, vei_conf_level=0.9, vei_percentile_method='R7',
                vei_compare_all_buckets=False, vei_plot=False, vei_plot_ref='',
                vei_use_log_normal_delta=True, vem_acceptable_inequity_level=0.05,
@@ -841,7 +941,14 @@ sale_error_array : ndarray, optional
     Array of relative sale errors, defined as
     (assessment - market_value) / market_value. Computed internally
     if required by the selected indicators.
-indicators : list of str, default ['Median', 'Mean', 'Weighted_Mean', 'CoD', 'PRD', 'PRB', 'VEI', 'VEM']
+mkt_value_proxy_array : ndarray, optional
+    Market value proxy for the VEI grouping and the VEM sort order.
+    Overrides `mkt_value_proxy_header` if provided. Used by the
+    bootstrap, which resamples arrays rather than a dataframe.
+prb_mvp_array : ndarray, optional
+    Market value proxy for the PRB regression. Overrides
+    `prb_mvp_header` if provided.
+indicators : list of str, default ['Median', 'Mean', 'Weighted_Mean', 'CoD', 'PRD', 'PRB', 'VEI']
     Indicators to compute.
 req_significance : float, default 0.05
     Required significance level (p-value) for PRB calculations

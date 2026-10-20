@@ -29,15 +29,15 @@ PAGES = [
      'The Appendix B detection techniques.'),
     ('ratio_study.ml_diagnostics', 'ml-diagnostics.md', 'ML diagnostics',
      'ASR predictability and the SHAP explanation family.'),
+    ('ratio_study.blinder_oaxaca', 'blinder-oaxaca.md', 'Blinder–Oaxaca',
+     'Decomposing a ratio gap between two groups.'),
     ('ratio_study.reporting', 'reporting.md', 'Reporting helpers',
      'Comparison tables and export helpers.'),
     ('ratio_study._data', 'sample-data.md', 'Sample data',
      'The bundled anonymised sales file.'),
 ]
 
-# Features still under testing: callable, but kept out of the published docs.
-UNDER_TEST_PREFIXES = ('bo_',)
-PUBLIC_TOP = {n for n in rs.__all__ if not n.startswith(UNDER_TEST_PREFIXES)}
+PUBLIC_TOP = set(rs.__all__)
 
 
 def signature_of(fn):
@@ -153,8 +153,6 @@ def demo_coverage():
 
     api = {}
     for name in rs.__all__:
-        if name.startswith(UNDER_TEST_PREFIXES):
-            continue
         obj = getattr(rs, name)
         if inspect.isfunction(obj):
             api[name] = ('ratio_study', obj)

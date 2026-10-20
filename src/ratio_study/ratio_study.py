@@ -13,6 +13,7 @@ from ratio_study.helpers import _add_needed_variables, iqr_filter, report_iqr_tr
 from ratio_study.confint import (normalize_ci_args, distribution_analysis,
                                  confidence_level_as_fraction,
                                  describe_ci_settings,
+                                 bootstrap_ci_result_columns,
                                  BOOTSTRAP_MIN_RESAMPLE_SIZE)
 from . import nw_utils
 
@@ -29,7 +30,7 @@ INDICATOR_DISPLAY_ORDER = [
     # uniformity within the stratum (horizontal equity)
     'CoD', 'CoD_rsd', 'CoDw', 'CoV', 'CoC_10', 'CoC_15', 'CoC_20', 'FSD',
     # vertical equity -- PRB before PRD: PRB is the supported measure, PRD is
-    # retired after the September 2026 Standard
+    # retired after the October 2026 Standard
     'PRB', 'PRD',
 ]
 
@@ -50,7 +51,106 @@ ACCURACY_DISPLAY_ORDER = ['RMSE', 'MAE', 'MAPE', 'MdAPE']
 # with the study -- so a default distribution-mode study silently had no
 # `Mean_ci` or `Weighted_Mean_ci` despite Appendix D giving a formula for both.
 DEFAULT_INDICATORS = ['Median', 'Mean', 'Weighted_Mean', 'CoD', 'PRD', 'PRB',
-                      'VEI', 'VEM']
+                      'VEI']
+
+# Label for sales whose group_by value is missing. A NaN group label never
+# equals itself, so those sales used to fall out of every group and leave a
+# zero-count row behind; nested groups showed them as the string 'nan'.
+MISSING_GROUP_LABEL = 'Missing'
+
+
+def _group_labels(group_df, group_header):
+    """
+    Build the per-sale group label for one `group_by` entry.
+
+    A single column keeps its own values (so numeric groups still sort
+    numerically); a list of columns is joined into one 'a, b, c' string.
+    Missing values become `MISSING_GROUP_LABEL` in both cases.
+
+    Parameters
+    ----------
+    group_df : pandas.DataFrame
+        The cleaned sales.
+    group_header : str or list of str
+        A single grouping column, or the columns of a nested grouping.
+
+    Returns
+    -------
+    pandas.Series
+        One label per row of `group_df`.
+    """
+    def _filled(col):
+        values = group_df[col].astype(object)
+        return values.where(values.notna(), MISSING_GROUP_LABEL)
+
+    if not isinstance(group_header, list):
+        return _filled(group_header)
+    labels = _filled(group_header[0]).astype(str)
+    for col in group_header[1:]:
+        labels = labels + ', ' + _filled(col).astype(str)
+    return labels
+
+
+def _sort_group_results(group_results):
+    """
+    Order one level's group rows by label, with the Missing group last.
+
+    Labels of mixed types (say ``1`` and ``'x'``) cannot be compared, so
+    those fall back to sorting on their string form.
+
+    Parameters
+    ----------
+    group_results : pandas.DataFrame
+        One row per group, with a 'Group' column.
+
+    Returns
+    -------
+    pandas.DataFrame
+        The same rows, reordered.
+    """
+    is_missing = group_results['Group'].astype(object).eq(MISSING_GROUP_LABEL)
+    present = group_results[~is_missing]
+    try:
+        present = present.sort_values(by=['Group'])
+    except TypeError:
+        present = present.sort_values(by=['Group'], key=lambda s: s.astype(str))
+    return pd.concat([present, group_results[is_missing]])
+
+
+def _n_sales(count):
+    """'1 sale' / 'n sales'."""
+    return f"{count} sale{'' if count == 1 else 's'}"
+
+
+def _no_usable_sales_message(sales_received, drops):
+    """
+    Explain, for someone who has not read the code, why no sale was usable.
+
+    Parameters
+    ----------
+    sales_received : int
+        Rows in the `input_df` the caller passed.
+    drops : list of (int, str)
+        Sales removed by each cleaning step and the reason, in the order the
+        steps ran. Reasons that removed nothing are left out of the message.
+
+    Returns
+    -------
+    str
+    """
+    if sales_received == 0:
+        return 'ratios() could not run: input_df has no rows.'
+    lines = [
+        f'ratios() could not run: none of the {_n_sales(sales_received)} in input_df is usable.',
+        'A sale is only used when the columns named by assessment_header and '
+        'market_value_header (and weights_header, mkt_value_proxy_header or '
+        'prb_mvp_header, when given) hold numbers, and the assessment and '
+        'market value are above zero. Sales removed, and why:',
+    ]
+    lines += [f'  - {_n_sales(count)}: {reason}' for count, reason in drops if count]
+    lines.append('Check that each argument names the intended column and that '
+                 'the column holds numeric values for these sales.')
+    return '\n'.join(lines)
 
 
 def _report_ci_messages(messages, error_messages):
@@ -110,7 +210,12 @@ def _confidence_intervals_for_scope(scope_df
                                   , req_significance
                                   , vei_conf_level
                                   , vei_use_log_normal_delta
-                                  , messages):
+                                  , messages
+                                  , mkt_value_proxy_header=None
+                                  , prb_mvp_header=None
+                                  , mvp_sale_price_share=DEFAULT_MVP_SALE_PRICE_SHARE
+                                  , vei_percentile_method='R7'
+                                  , vem_args=None):
     """
     Build the ``<indicator>_ci`` entries for one scope, in whichever mode
     the caller asked for.
@@ -147,6 +252,16 @@ def _confidence_intervals_for_scope(scope_df
         Passed through to the per-resample recalculation.
     messages : list of str
         Accumulator for notes a formula raises about the sample.
+    mkt_value_proxy_header, prb_mvp_header : str or None
+        Value-proxy columns, resampled alongside the sales so each
+        resample's VEI, VEM and PRB group the same way the study does.
+    mvp_sale_price_share : float
+        Sale-price share of the proxy built when no proxy column is given.
+    vei_percentile_method : str
+        Quantile-ranking method for each resample's VEI.
+    vem_args : dict or None
+        ``acceptable_inequity_level``, ``conf_level`` and ``ci_method`` for
+        each resample's VEM, matching the study's own settings.
 
     Returns
     -------
@@ -181,7 +296,12 @@ def _confidence_intervals_for_scope(scope_df
                                , vei_use_log_normal_delta=vei_use_log_normal_delta
                                , indicators=bootstrap_args['bootstrap_indicators']
                                , concurrency=bootstrap_args['bootstrap_concurrency']
-                               , seed=bootstrap_args['bootstrap_seed'])
+                               , seed=bootstrap_args['bootstrap_seed']
+                               , mkt_value_proxy_header=mkt_value_proxy_header
+                               , prb_mvp_header=prb_mvp_header
+                               , mvp_sale_price_share=mvp_sale_price_share
+                               , vei_percentile_method=vei_percentile_method
+                               , vem_args=vem_args)
 
 
 def ratios(input_df
@@ -231,6 +351,8 @@ def ratios(input_df
           , iqr_filter_result='print'
           , return_dict=False
           , VE_bundle_comments=False
+          , strata_uniformity_checks=True
+          , level_of_assessment=None
           ):
 
     """
@@ -290,8 +412,7 @@ def ratios(input_df
         Name used for output file names and chart titles.
     indicators : list of str, optional
         Indicators to compute. Defaults to
-        ``['Median', 'Mean', 'Weighted_Mean', 'CoD', 'PRD', 'PRB', 'VEI',
-        'VEM']``.
+        ``['Median', 'Mean', 'Weighted_Mean', 'CoD', 'PRD', 'PRB', 'VEI']``.
     gini_args : dict, optional
         Options for the Gini decomposition:
 
@@ -302,7 +423,7 @@ def ratios(input_df
           model variables to decompose the Gini coefficient by.
         * gini_lorenz_plots : bool, default False -- generate Lorenz curve plots.
     bo_args : dict, optional
-        Experimental; under testing and not yet documented. Leave unset.
+        Arguments for the Binder-Oaxaca decomposition.
     confidence_intervals_aggs : bool, str, list, or dict, default None
         Which bootstrap confidence intervals to compute. This is the
         shorthand for `bootstrap_args`, and it is applied last, so
@@ -330,7 +451,7 @@ def ratios(input_df
           ``min_count_threshold`` sales (20 by default) before it will
           produce one.
         * ``'distribution'`` -- use the closed-form formula the IAAO
-          Exposure Draft (May 2026) Appendix D prescribes for each
+          Standard on Ratio Studies (October 2026) Appendix D prescribes for each
           indicator: Student's t about the mean (D.1), the rank formula
           for the median (D.2), the ratio-estimator standard error for the
           weighted mean (D.3), the binomial tables for a median on 30
@@ -369,9 +490,14 @@ def ratios(input_df
         in distribution mode, intersected in both cases with
         `indicators`. Anything the mode cannot produce an interval for is
         dropped with a message. An indicator named here that the study
-        does not compute is added to `indicators` in distribution mode --
-        the closed forms are cheap -- and dropped with a message in
-        bootstrap mode.
+        does not compute is added to `indicators`, in either mode -- even
+        one the mode has no interval for, which is then computed without
+        one. In bootstrap mode `MKI` and `RRI` come out as
+        ``MKI_ci`` / ``RRI_ci``, `VEI` as ``VEI_ci``, and `VEM` as
+        ``Inequity_severity_ci`` and ``Inequity_prevalence_ci``. VEM is
+        by far the slowest to resample -- every draw recomputes a moving
+        median with a confidence band at each sale -- so expect it to
+        dominate the run time on large samples.
     ci_seed : int, default None
         Seed for the bootstrap resampler. Left unset, two identical runs
         publish slightly different intervals; set it when the numbers have
@@ -572,6 +698,21 @@ def ratios(input_df
         ratios DataFrame.
     VE_bundle_comments : bool, default False
         If True, bundle vertical equity descriptive comments together.
+    strata_uniformity_checks : bool, default True
+        With `descriptive` and a `group_by`, check each stratum's level of
+        assessment against the overall level (IAAO 11.2.1, uniformity among
+        strata: within 5 percent -- not 5 percentage points) and against
+        every other stratum of the same grouping (IAAO 11.2.2, uniformity
+        between classes: not probably differing by more than 10 percent),
+        and comment on and mark the strata that fail. Confidence intervals
+        are compared at their nearest bounds where both sides have one;
+        11.2.1 falls back to the point estimates otherwise, while 11.2.2 is
+        only tested with intervals. False skips both checks.
+    level_of_assessment : {'Median', 'Mean', 'Weighted_Mean'}, optional
+        Statistic used as the level of assessment in those checks. Default:
+        the Median when it is among `indicators`, else the Weighted Mean,
+        else the Mean. A statistic named here that `indicators` lacks is
+        added to it.
 
     Returns
     -------
@@ -636,6 +777,16 @@ def ratios(input_df
     discrete_variables = [] if discrete_variables is None else list(discrete_variables)
     indicators = list(DEFAULT_INDICATORS) if indicators is None else list(indicators)
 
+    # The level of assessment the between-strata checks compare. A statistic
+    # named explicitly is added to the study, as an interval named in
+    # `ci_indicators` is; left to the default, it is whichever the study
+    # already computes, the Median first.
+    from ratio_study.reporting import normalize_level_of_assessment
+    level_of_assessment = normalize_level_of_assessment(level_of_assessment)
+    if (descriptive and strata_uniformity_checks and level_of_assessment
+            and level_of_assessment not in indicators):
+        indicators.append(level_of_assessment)
+
 
     # LAZY IMPORTS
     if (graphs_args and 'pdf_overall_asr_graphs' in graphs_args and graphs_args['pdf_overall_asr_graphs']) \
@@ -686,7 +837,7 @@ def ratios(input_df
     _report_ci_messages(ci_messages, error_messages)
 
     # An interval the caller asked for by name, on an indicator the study was
-    # not computing, brings that indicator into the study in distribution mode
+    # not computing, brings that indicator into the study (either mode)
     # rather than being dropped -- otherwise the interval would have nothing to
     # sit beside. See `normalize_ci_args`, `study_indicators`.
     indicators += [x for x in bootstrap_args.get('ci_study_indicator_additions', [])
@@ -733,10 +884,34 @@ def ratios(input_df
         if prb_mvp_header is not None:
             required_cols, error_messages = _add_needed_variables(vars=[prb_mvp_header], required_cols=required_cols, input_df=input_df, error_messages=error_messages)
 
+        # Sales removed by each cleaning step, with the argument and column
+        # responsible, so that an input which cleans down to nothing can say
+        # where its sales went.
+        _sales_received = len(input_df)
+        _cleaning_drops = []
+        _value_args = {}
+        for _arg, _col in (('assessment_header', assessment_header)
+                           , ('market_value_header', market_value_header)
+                           , ('weights_header', weights_header)
+                           , ('mkt_value_proxy_header', mkt_value_proxy_header)
+                           , ('prb_mvp_header', prb_mvp_header)):
+            if _col is not None:
+                _value_args.setdefault(_col, f"{_arg}='{_col}'")
+
         # force assessment, market_value_header and weights to be numeric
         try:
-            for col in required_cols:
-                input_df = input_df[pd.to_numeric(input_df[col], errors='coerce').notnull()]
+            for col in sorted(required_cols, key=list(_value_args).index):
+                _is_null = input_df[col].isna()
+                _is_numeric = pd.to_numeric(input_df[col], errors='coerce').notnull()
+                _not_numeric = ~_is_numeric & ~_is_null
+                _cleaning_drops.append((int(_is_null.sum()), f'{_value_args[col]} is empty (NaN or None)'))
+                if _not_numeric.any():
+                    _examples = ', '.join(repr(str(v)) for v in input_df.loc[_not_numeric, col].drop_duplicates().head(3))
+                    _cleaning_drops.append((int(_not_numeric.sum()),
+                                            f'{_value_args[col]} is not a number, e.g. {_examples}. Strip '
+                                            'thousands separators and currency symbols, or convert the '
+                                            'column with pd.to_numeric() first'))
+                input_df = input_df[_is_numeric]
         except Exception as ex:
             print('error', ex)
 
@@ -788,8 +963,19 @@ def ratios(input_df
         _records_before_narrowing = input_df if iqr_trim_multiple else None
         input_df = input_df[list(required_cols)].copy()
 
-        input_df.dropna(subset=[assessment_header, market_value_header], inplace=True)
-        input_df = input_df[(input_df[market_value_header] > 0) & (input_df[assessment_header] > 0)]
+        # The numeric check above keeps numbers stored as text ('350000'),
+        # which then fail every comparison below with an opaque TypeError.
+        for col in _value_args:
+            if col in input_df.columns:
+                input_df[col] = pd.to_numeric(input_df[col])
+
+        for col in (assessment_header, market_value_header):
+            _cleaning_drops.append((int(input_df[col].isna().sum()), f'{_value_args[col]} is empty (NaN or None)'))
+            input_df = input_df.dropna(subset=[col])
+        for col in (assessment_header, market_value_header):
+            _not_positive = input_df[col] <= 0
+            _cleaning_drops.append((int(_not_positive.sum()), f'{_value_args[col]} is zero or negative'))
+            input_df = input_df[~_not_positive]
 
         if print_ci_settings:
             # After cleaning, so the reported resample size is the count the
@@ -849,10 +1035,26 @@ def ratios(input_df
                 , model_name=model_name
                 , total_count=len(input_df))
             input_df=input_df.loc[input_df['asr_outlier'] == 0].drop(columns=['asr_outlier']).copy()
+            _cleaning_drops.append((len(_trimmed),
+                                    'the assessment-to-sale ratio was trimmed as an outlier '
+                                    f'(iqr_trim_multiple={iqr_trim_multiple}); raise iqr_trim_multiple '
+                                    'or set it to 0 to keep them'))
 
         if weights_header:
-            input_df.dropna(subset=[weights_header], inplace=True)
+            input_df.dropna(subset=[weights_header], inplace=True)  # already counted as empty above
             input_df[weights_header] = input_df[weights_header] / input_df[weights_header].mean()
+
+        # Nothing below can be computed on zero sales, and the grouped step
+        # would otherwise fail on an empty results frame with a bare
+        # KeyError, discarding the whole study.
+        if input_df.empty:
+            error_messages.append(_no_usable_sales_message(_sales_received, _cleaning_drops))
+            # Returned rather than raised, like the other input errors, so
+            # warn as well: otherwise the reason sits unseen in the dict.
+            warnings.warn(error_messages[-1], stacklevel=2)
+            if gen_log:
+                logging.warning(error_messages[-1])
+            return {'errors': [save_errors_to_text(error_messages, os.path.join(export_directory, 'errors_in_ratio_study.txt')), error_messages]}
 
         if log_transform:
             input_df[assessment_header] = np.exp(input_df[assessment_header])
@@ -872,6 +1074,12 @@ def ratios(input_df
         # this dict without ``gini_decomposition`` ever running, and the
         # earlier indicator-gated guard left it unbound in that case.
         gini_decomp_results = {}
+
+        # The VEM settings each bootstrap resample reuses, so a resampled
+        # severity / prevalence is measured the same way as the study's own.
+        vem_bootstrap_args = {'acceptable_inequity_level': vem_acceptable_inequity_level
+                              , 'conf_level': vem_conf_level
+                              , 'ci_method': vem_ci_method}
 
         # run population ratios
         population_ratios = ratios_calculator(input_df=input_df
@@ -918,7 +1126,12 @@ def ratios(input_df
                 , req_significance=req_significance
                 , vei_conf_level=vei_conf_level
                 , vei_use_log_normal_delta=vei_use_log_normal_delta
-                , messages=error_messages)
+                , messages=error_messages
+                , mkt_value_proxy_header=mkt_value_proxy_header
+                , prb_mvp_header=prb_mvp_header
+                , mvp_sale_price_share=mvp_sale_price_share
+                , vei_percentile_method=vei_percentile_method
+                , vem_args=vem_bootstrap_args)
         if population_cis:
             population_ratios.update(population_cis)
         else:
@@ -1132,44 +1345,18 @@ def ratios(input_df
 
             group_by = valid_group_by
             if group_by:
-
-                # check if each group_by variable exists in input_df
-                for group_header in group_by:
-                    if isinstance(group_header, list):
-                        for header in group_header:
-                            if header not in input_df:
-                                error_messages.append('Error in grouped ratios: ' + header + ' is not contained in input_df. Please check for misspellings on headers')
-                                if gen_log:
-                                    logging.warning('Error in grouped ratios: ' + header + ' is not contained in input_df. Please check for misspellings on headers')
-                                group_by.remove(group_header)
-                    else:
-                        if group_header not in input_df:
-                            error_messages.append('Error in grouped ratios: ' + group_header + ' is not contained in input_df. Please check for misspellings on headers')
-                            if gen_log:
-                                logging.warning('Error in grouped ratios: ' + group_header + ' is not contained in input_df. Please check for misspellings on headers')
-                            group_by.remove(group_header)
                 # group data
                 for group_header in group_by:
                     group_df = input_df.copy()
                     group_df['group'] = ''
-                    if isinstance(group_header, list):  # if there are nested hierarchical groups
-                        level = ', '.join(group_header)
-                        group_df['ratio_group'] = group_df[group_header[0]].astype(str)
-                        i = 1
-                        while i < len(group_header):
-                            group_df['ratio_group'] = group_df['ratio_group'] + ', ' + group_df[group_header[i]].astype(str)
-                            i += 1
-                    else:
-                        level = group_header
-                        group_df['ratio_group'] = group_df[group_header]
-
-                    ratio_groups = group_df['ratio_group'].drop_duplicates().tolist()  # determine groups
+                    level = ', '.join(group_header) if isinstance(group_header, list) else group_header
+                    group_df['ratio_group'] = _group_labels(group_df, group_header)
 
                     # run ratios for each grouping
                     ratios_results = []
-                    for ratio_group in ratio_groups:
+                    for ratio_group, group_slice in group_df.groupby('ratio_group', sort=False):
                         str_group_header = ','.join(str(g) for g in group_header) if isinstance(group_header, list) else group_header
-                        group_ratios = ratios_calculator(input_df=group_df[group_df['ratio_group'] == ratio_group]
+                        group_ratios = ratios_calculator(input_df=group_slice
                                                         , market_value_header=market_value_header
                                                         , assessment_header=assessment_header
                                                         , mkt_value_proxy_header=mkt_value_proxy_header
@@ -1203,7 +1390,7 @@ def ratios(input_df
                         group_cis = None
                         if bootstrap_args['bootstrap_cis_for_groups']:
                             group_cis = _confidence_intervals_for_scope(
-                                group_df[group_df['ratio_group'] == ratio_group]
+                                group_slice
                                 , assessment_header, market_value_header, weights_header
                                 , bootstrap_args=bootstrap_args
                                 , ratios_dict=group_ratios
@@ -1211,7 +1398,12 @@ def ratios(input_df
                                 , req_significance=req_significance
                                 , vei_conf_level=vei_conf_level
                                 , vei_use_log_normal_delta=vei_use_log_normal_delta
-                                , messages=error_messages)
+                                , messages=error_messages
+                                , mkt_value_proxy_header=mkt_value_proxy_header
+                                , prb_mvp_header=prb_mvp_header
+                                , mvp_sale_price_share=mvp_sale_price_share
+                                , vei_percentile_method=vei_percentile_method
+                                , vem_args=vem_bootstrap_args)
                         if group_cis:
                             group_ratios.update(group_cis)
                         else:
@@ -1225,7 +1417,6 @@ def ratios(input_df
                             if group_ratios.get('Count', 0) >= min_panel_n:
                                 from ratio_study.graphs import vertical_equity_panel
 
-                                group_slice = group_df[group_df['ratio_group'] == ratio_group]
                                 group_panel = vertical_equity_panel(
                                     df=group_slice
                                     , assessment_header=assessment_header
@@ -1262,13 +1453,19 @@ def ratios(input_df
                         group_ratios['Level'] = level
                         group_ratios['Group'] = ratio_group
                         ratios_results.append(group_ratios)
-                    group_results = pd.DataFrame(ratios_results)
-                    group_results.sort_values(by=['Group'], inplace=True)
+                    if not ratios_results:
+                        error_messages.append('Grouped ratios skipped for ' + str(level) + ': no groups with sales.')
+                        continue
+                    group_results = _sort_group_results(pd.DataFrame(ratios_results))
 
                     if level == 'rsSaleDate':  # special formatting for sale date originally as int YYYYMM
-                        group_results.loc[group_results['Group'] <= 0, 'Group'] = 200001
-                        group_results['Group'] = pd.to_datetime(group_results['Group'], format='%Y%m')  # convert to datetime
-                        group_results['Group'] = group_results['Group'].dt.strftime('%b-%Y')  # convert to string in MMM-YYYY format
+                        group_results['Group'] = group_results['Group'].astype(object)
+                        dated = group_results['Group'].ne(MISSING_GROUP_LABEL)
+                        sale_months = pd.to_numeric(group_results.loc[dated, 'Group'])
+                        sale_months = sale_months.where(sale_months > 0, 200001).astype(int)
+                        group_results.loc[dated, 'Group'] = (
+                            pd.to_datetime(sale_months.astype(str), format='%Y%m')  # convert to datetime
+                            .dt.strftime('%b-%Y'))  # convert to string in MMM-YYYY format
 
                     df_results = pd.concat([df_results, group_results], ignore_index=True, axis=0)
 
@@ -1635,7 +1832,10 @@ def ratios(input_df
 
         suffixes_to_add = {}
         if bootstrap_args['bootstrap_cis_for_population'] or bootstrap_args['bootstrap_cis_for_groups']:
-            ci_columns = list(bootstrap_args['bootstrap_indicators'])
+            # MKI, RRI and VEM carry their intervals under other column names
+            # (see `BOOTSTRAP_CI_RESULT_COLUMNS`); asking for 'MKI_ci' would
+            # match nothing and silently drop the interval.
+            ci_columns = bootstrap_ci_result_columns(bootstrap_args['bootstrap_indicators'])
             # PRB is the one indicator with an interval of its own, from the
             # slope regression, and it is now built at `ci_conf_level` like
             # everything else -- so it can be shown whenever the bootstrap
@@ -1670,7 +1870,9 @@ def ratios(input_df
             df_results_formatted = _add_comments(df_results_formatted, req_significance, assessment_standards, results_cols, results_format, skip=['Level', 'Group', 'FSD']
                                                  , ci_conf_level=bootstrap_args['bootstrap_confint_level']
                                                  , min_count_threshold=bootstrap_args['min_count_threshold']
-                                                 , VE_bundle_comments=VE_bundle_comments)
+                                                 , VE_bundle_comments=VE_bundle_comments
+                                                 , strata_uniformity_checks=strata_uniformity_checks
+                                                 , level_of_assessment=level_of_assessment)
         else:
             df_results_formatted = custom_format(df_results_formatted, results_cols, results_format, skip=['Level', 'Group', 'FSD'])
 
@@ -1764,7 +1966,9 @@ def rts_calculator(input_df=None
                       , weights_array=None
                       , asr_array=None
                       , sale_error_array=None
-                      , indicators=['Median', 'Mean', 'Weighted_Mean', 'CoD', 'PRD', 'PRB', 'VEI', 'VEM']  # keep in step with DEFAULT_INDICATORS
+                      , mkt_value_proxy_array=None
+                      , prb_mvp_array=None
+                      , indicators=['Median', 'Mean', 'Weighted_Mean', 'CoD', 'PRD', 'PRB', 'VEI']  # keep in step with DEFAULT_INDICATORS
                       , req_significance=0.05
                       , vei_conf_level=0.9
                       , vei_percentile_method='R7'
@@ -1833,7 +2037,14 @@ def rts_calculator(input_df=None
         Array of relative sale errors, defined as
         (assessment - market_value) / market_value. Computed internally
         if required by the selected indicators.
-    indicators : list of str, default ['Median', 'Mean', 'Weighted_Mean', 'CoD', 'PRD', 'PRB', 'VEI', 'VEM']
+    mkt_value_proxy_array : ndarray, optional
+        Market value proxy for the VEI grouping and the VEM sort order.
+        Overrides `mkt_value_proxy_header` if provided. Used by the
+        bootstrap, which resamples arrays rather than a dataframe.
+    prb_mvp_array : ndarray, optional
+        Market value proxy for the PRB regression. Overrides
+        `prb_mvp_header` if provided.
+    indicators : list of str, default ['Median', 'Mean', 'Weighted_Mean', 'CoD', 'PRD', 'PRB', 'VEI']
         Indicators to compute.
     req_significance : float, default 0.05
         Required significance level (p-value) for PRB calculations
@@ -1936,7 +2147,9 @@ def rts_calculator(input_df=None
             input_df[assessment_header] = np.exp(input_df[assessment_header])
         market_value = market_value_array if market_value_array is not None else np.array(input_df[market_value_header])
         assessment = assessment_array if assessment_array is not None else np.array(input_df[assessment_header])
-        if prb_mvp_header:
+        if prb_mvp_array is not None:
+            prb_mvp = prb_mvp_array
+        elif prb_mvp_header:
             prb_mvp = np.array(input_df[prb_mvp_header])
         else:
             prb_mvp = None
@@ -1984,9 +2197,14 @@ def rts_calculator(input_df=None
                     results['PRB_ci'] = prb_results[2] if n > 3 else np.nan
 
         if 'VEI' in indicators: 
-            if mkt_value_proxy_header is None:
-                mkt_value_proxy = market_value_proxy(input_df[market_value_header],
-                                                     input_df[assessment_header],
+            if mkt_value_proxy_array is not None:
+                mkt_value_proxy = mkt_value_proxy_array
+            elif mkt_value_proxy_header is None:
+                # From the arrays rather than `input_df`, which the bootstrap
+                # does not pass: each resample builds its proxy from its own
+                # sales and median, exactly as the study does.
+                mkt_value_proxy = market_value_proxy(market_value,
+                                                     assessment,
                                                      asr_md=results['Median'],
                                                      mvp_sale_price_share=mvp_sale_price_share)
             else:
@@ -2023,10 +2241,20 @@ def rts_calculator(input_df=None
                 results['vei_plot'] = vei_results['vei_plot']
 
         if 'VEM' in indicators:
-            input_df['asr'] = asr
             window_size = 1000 if n > 10000 else int(n/10)
-            vem_results = vem(df=input_df,
-                                        market_value_proxy=mkt_value_proxy_header if mkt_value_proxy_header else market_value_header,
+            if input_df is None:
+                # Bootstrap resample: arrays only. Sort on the supplied proxy
+                # when there is one, the sale amount otherwise -- the same
+                # choice the dataframe path makes below.
+                vem_df = pd.DataFrame({'asr': asr,
+                                       'vem_mvp': mkt_value_proxy_array if mkt_value_proxy_array is not None else market_value})
+                vem_mvp_col = 'vem_mvp'
+            else:
+                input_df['asr'] = asr
+                vem_df = input_df
+                vem_mvp_col = mkt_value_proxy_header if mkt_value_proxy_header else market_value_header
+            vem_results = vem(df=vem_df,
+                                        market_value_proxy=vem_mvp_col,
                                         window_size=window_size,
                                         generate_plot=vem_plot,
                                         plot_title=vem_title,
@@ -2137,6 +2365,12 @@ def _ratios_calculator_wrap(input_dict):
           plots.
         * gini_plot_ref : str -- reference label for the Lorenz curve
           plot.
+        * mkt_value_proxy_array, prb_mvp_array : ndarray, optional --
+          resampled proxy columns for the VEI / VEM and the PRB.
+        * mvp_sale_price_share : float, optional -- sale-price share of a
+          proxy built from the sales.
+        * vem_args : dict, optional -- VEM settings, passed on as
+          ``vem_<key>``.
 
     Returns
     -------
@@ -2161,6 +2395,10 @@ def _ratios_calculator_wrap(input_dict):
                                    , vei_plot_ref=input_dict['vei_plot_ref'] if 'vei_plot_ref' in input_dict else ''
                                    , vei_percentile_method=input_dict['vei_percentile_method']
                                    , vei_use_log_normal_delta=input_dict['vei_use_log_normal_delta']
+                                   , mkt_value_proxy_array=input_dict.get('mkt_value_proxy_array')
+                                   , prb_mvp_array=input_dict.get('prb_mvp_array')
+                                   , mvp_sale_price_share=input_dict.get('mvp_sale_price_share', DEFAULT_MVP_SALE_PRICE_SHARE)
+                                   , **{'vem_' + k: v for k, v in input_dict.get('vem_args', {}).items()}
                                    , run_regression=True
                                    , skip_fsd=True
                                    , skip_count=True
@@ -2188,6 +2426,7 @@ def ratios_report(sales_df
         , descriptive=True
         , indicators=None
         , model_name='model'
+        , report_title=None
         , export_filename_date_ref=''
         , gini_args = {}
         , bo_args={}
@@ -2219,6 +2458,8 @@ def ratios_report(sales_df
         , print_ci_settings=True
         , return_dict=True
         , VE_bundle_comments=False
+        , strata_uniformity_checks=True
+        , level_of_assessment=None
         , excel_sensitivity_tag=None
         , site_id = None
         ):
@@ -2256,11 +2497,14 @@ def ratios_report(sales_df
     descriptive : bool, default True
         If True, ratios are evaluated against `assessment_standards` and
         reported with asterisks and comments where applicable.
-    indicators : list of str, default ['Median', 'Mean', 'Weighted_Mean', 'CoD', 'PRD', 'PRB', 'VEI', 'VEM']
+    indicators : list of str, default ['Median', 'Mean', 'Weighted_Mean', 'CoD', 'PRD', 'PRB', 'VEI']
         Indicators to compute.
     model_name : str, default 'model'
         Model name. Used for naming exported files and adding a title to
         charts.
+    report_title : str, optional
+        Overrides the default PDF report title (base date, "Sales Ratio
+        Study" and model name) with this exact text.
     export_filename_date_ref : str, default ''
         Date/time reference appended to exported file names. If not
         provided, the current date/time is used.
@@ -2277,7 +2521,31 @@ def ratios_report(sales_df
         * gini_lorenz_plots : bool, default False -- generate Lorenz curve
           plots.
     bo_args : dict, optional
-        Experimental; under testing and not yet documented. Leave unset.
+        Options for the Blinder-Oaxaca decomposition, passed through to
+        `ratios`:
+
+        * run_bo : bool, default False -- run the decomposition.
+        * group_col : str, optional -- column identifying the two groups
+          being compared.
+        * characteristics : list of str, default [] -- explanatory
+          variables used in the decomposition.
+        * log_asr : bool, default True -- decompose the log of the ASR.
+        * reference : str, default 'sloczynski' -- reference weighting
+          scheme for the single decomposition.
+        * references : list of str, default ['group_0', 'group_1', 'sloczynski'] -- reference schemes used for the multi-model decomposition.
+        * threshold, group_high_label, group_low_label : optional --
+          used to derive the two groups from a continuous/threshold
+          variable.
+        * dummy_sets, detail_groups : optional -- groupings of dummy
+          variables for detailed decomposition results.
+        * alpha : float, default 0.05 -- significance level.
+        * stratify_by : optional -- column(s) to stratify the multi-model
+          decomposition by.
+        * bo_coefficient_plot, bo_decomposition_plot, bo_detail_plot :
+          bool, default True -- which Blinder-Oaxaca plots to generate.
+
+        If Blinder-Oaxaca results are produced, they're exported to a
+        dedicated Excel workbook alongside the ratios/Gini exports.
     confidence_intervals_aggs : bool, str, list, or dict, default None
         Which bootstrap confidence intervals to compute. This is the
         shorthand for `bootstrap_args`, and it is applied last, so
@@ -2305,7 +2573,7 @@ def ratios_report(sales_df
           ``min_count_threshold`` sales (20 by default) before it will
           produce one.
         * ``'distribution'`` -- use the closed-form formula the IAAO
-          Exposure Draft (May 2026) Appendix D prescribes for each
+          Standard on Ratio Studies (October 2026) Appendix D prescribes for each
           indicator: Student's t about the mean (D.1), the rank formula
           for the median (D.2), the ratio-estimator standard error for the
           weighted mean (D.3), the binomial tables for a median on 30
@@ -2344,9 +2612,14 @@ def ratios_report(sales_df
         in distribution mode, intersected in both cases with
         `indicators`. Anything the mode cannot produce an interval for is
         dropped with a message. An indicator named here that the study
-        does not compute is added to `indicators` in distribution mode --
-        the closed forms are cheap -- and dropped with a message in
-        bootstrap mode.
+        does not compute is added to `indicators`, in either mode -- even
+        one the mode has no interval for, which is then computed without
+        one. In bootstrap mode `MKI` and `RRI` come out as
+        ``MKI_ci`` / ``RRI_ci``, `VEI` as ``VEI_ci``, and `VEM` as
+        ``Inequity_severity_ci`` and ``Inequity_prevalence_ci``. VEM is
+        by far the slowest to resample -- every draw recomputes a moving
+        median with a confidence band at each sale -- so expect it to
+        dominate the run time on large samples.
     ci_seed : int, default None
         Seed for the bootstrap resampler. Left unset, two identical runs
         publish slightly different intervals; set it when the numbers have
@@ -2459,6 +2732,38 @@ def ratios_report(sales_df
           PDF page.
         * classification_header : str, optional -- classification header
           shown in the PDF.
+        * pdf_logo : str, Path or dict, optional -- add a logo to the report
+          pages. A path, or a dict with ``path``; ``pages`` (``'first'``,
+          the default, or ``'all'``); ``position`` (``'top_left'`` default,
+          ``'top_center'``, ``'top_right'``); ``max_height`` (80) and
+          ``max_width`` (300), in points. The image is scaled to fit,
+          never distorted. Off by default.
+        * pdf_watermark : str, Path or dict, optional -- add a watermark
+          behind the content of every report page. A path, or a dict with
+          ``path``; ``position`` (``'fill'`` default, ``'center'``,
+          ``'top_left'``, ``'top_right'``, ``'bottom_left'``,
+          ``'bottom_right'``); ``opacity`` (0 invisible to 1 opaque, default
+          0.15); ``scale`` (0.5, share of the page the image may take, except
+          for ``'fill'``). ``'fill'`` scales the image as large as the page
+          allows without distorting or cropping it. Off by default.
+        * pdf_page_numbers : bool or dict, optional -- number the pages. True,
+          or a dict with ``position`` (``'bottom_center'`` default,
+          ``'bottom_left'``, ``'bottom_right'``); ``font_size`` (9);
+          ``format`` (``'number'`` default, or ``'page_of_n'`` for
+          "Page 3 of 12"). Off by default.
+        * pdf_cover : bool, str or dict, optional -- add a cover page. A dict
+          with ``title`` (default: the report title; a bare string is
+          shorthand for it), ``subtitle``, ``authors`` (str or list),
+          ``date`` (str, date or datetime; default today) and ``logo`` (a
+          path or a dict with ``path``, ``max_height``, ``max_width``),
+          independent of ``pdf_logo``. The cover has no page number and no
+          watermark, and is not counted in the page numbers or the total.
+        * pdf_index : bool or dict, optional -- needs ``pdf_cover``. Add a
+          page after the cover with the title (``{'title': ...}`` to
+          override) and an index of the report's sections with page numbers.
+          Like the cover it is not numbered or counted, so the first report
+          page is page 1, which is what the index quotes. It carries the
+          watermark, and the logo when ``pages='all'``.
     generate_log : bool, default False
         If True, a log file is saved to `export_directory`.
     log_transform : bool, default False
@@ -2524,6 +2829,21 @@ def ratios_report(sales_df
         Passed through to `ratios` as `return_dict`.
     VE_bundle_comments : bool, default False
         If True, bundle vertical equity descriptive comments together.
+    strata_uniformity_checks : bool, default True
+        With `descriptive` and a `group_by`, check each stratum's level of
+        assessment against the overall level (IAAO 11.2.1, uniformity among
+        strata: within 5 percent -- not 5 percentage points) and against
+        every other stratum of the same grouping (IAAO 11.2.2, uniformity
+        between classes: not probably differing by more than 10 percent),
+        and comment on and mark the strata that fail. Confidence intervals
+        are compared at their nearest bounds where both sides have one;
+        11.2.1 falls back to the point estimates otherwise, while 11.2.2 is
+        only tested with intervals. False skips both checks.
+    level_of_assessment : {'Median', 'Mean', 'Weighted_Mean'}, optional
+        Statistic used as the level of assessment in those checks. Default:
+        the Median when it is among `indicators`, else the Weighted Mean,
+        else the Mean. A statistic named here that `indicators` lacks is
+        added to it.
     excel_sensitivity_tag : str, optional
         Sensitivity label tag written as custom document properties (e.g.
         MSIP labels) on exported Excel workbooks. Requires `site_id` to
@@ -2566,7 +2886,7 @@ def ratios_report(sales_df
     """
 
     try:
-        from ratio_study.reporting import _export_dataframes_as_excel_tabs, _pdf_breakdown_ratios_by_grouping, _pdf_output
+        from ratio_study.reporting import _export_dataframes_as_excel_tabs, _pdf_breakdown_ratios_by_grouping, _pdf_output, _normalize_pdf_branding
 
     except Exception as ex:
         raise RuntimeError('Error in ratios_report:', ex)
@@ -2574,7 +2894,7 @@ def ratios_report(sales_df
     try:
         # set default values
         std_gini_args = {'run_regression':True, 'gini_decomposition':False, 'gini_factors_variables':[], 'gini_lorenz_plots':False}
-        std_pdf_args = {'gen_pdf_report':True, 'pdf_ratios_table_headers':['Median', 'Mean', 'CoD', 'PRB', 'RRI', 'MKI'], 'pdf_overall_asr_graphs':True, 'pdf_group_asr_graphs':False, 'pdf_mosaic_group_asr_graphs':False
+        std_pdf_args = {'gen_pdf_report':True, 'pdf_ratios_table_headers':['Median', 'CoD', 'PRB', 'PRD', 'VEI'], 'pdf_overall_asr_graphs':True, 'pdf_group_asr_graphs':False, 'pdf_mosaic_group_asr_graphs':False
             , 'pdf_asr_graphs_x_vars_and_aliases': {'overall':[], 'groups':[], 'groups_mosaic':[]}, 'pdf_grouping_aliases':{}, 'pdf_starting_comments':[], 'pdf_ending_comments':[], 'facet_col_limit_per_page': 3, 'facet_row_limit_per_page': 4
             , 'pdf_vertical_equity_panel': True, 'pdf_vertical_equity_panel_groups': False
             , 'pdf_vertical_equity_panel_min_count': 30
@@ -2617,6 +2937,12 @@ def ratios_report(sales_df
             if x not in indicators
         ]
         pdf_args['pdf_ratios_table_headers'] = [x for x in pdf_args['pdf_ratios_table_headers'] if x in indicators]
+
+        # Fail on a bad logo/watermark path or option now, not after the study has run.
+        if pdf_args['gen_pdf_report']:
+            _normalize_pdf_branding(pdf_args.get('pdf_logo'), pdf_args.get('pdf_watermark')
+                                    , pdf_args.get('pdf_page_numbers'), pdf_args.get('pdf_cover')
+                                    , pdf_args.get('pdf_index'))
 
         # set date reference for exported files
         if not export_filename_date_ref:
@@ -2675,6 +3001,8 @@ def ratios_report(sales_df
             , print_ci_settings=print_ci_settings
             , return_dict=True
             , VE_bundle_comments=VE_bundle_comments
+            , strata_uniformity_checks=strata_uniformity_checks
+            , level_of_assessment=level_of_assessment
 
         )
 
@@ -2787,6 +3115,7 @@ def ratios_report(sales_df
                 _pdf_output(export_pdf_filepath=export_pdf_filepath
                            , ratio_tables_dfs=ratio_tables_dfs
                            , model_name=model_name
+                           , report_title=report_title
                            , base_date=base_date
                            , overall_graphs=dict_results['overall_graphs']
                            , group_graphs=dict_results['group_graphs']
@@ -2797,6 +3126,11 @@ def ratios_report(sales_df
                            , ending_comments=pdf_args['pdf_ending_comments']
                            , starting_comments=pdf_args['pdf_starting_comments']
                            , classification_header = pdf_args['classification_header'] if 'classification_header' in pdf_args else None
+                           , logo=pdf_args.get('pdf_logo')
+                           , watermark=pdf_args.get('pdf_watermark')
+                           , page_numbers=pdf_args.get('pdf_page_numbers')
+                           , cover=pdf_args.get('pdf_cover')
+                           , index=pdf_args.get('pdf_index')
                            )
                 dict_results['exported_files'].append(export_pdf_filepath)
             except Exception as ex:
@@ -2847,7 +3181,11 @@ def _bootstrap_stacker(input_df
                       , vei_use_log_normal_delta=True
                       , concurrency=None
                       , log_transform=False
-                      , seed=None):
+                      , seed=None
+                      , mkt_value_proxy_header=None
+                      , prb_mvp_header=None
+                      , mvp_sale_price_share=DEFAULT_MVP_SALE_PRICE_SHARE
+                      , vem_args=None):
     """
     Resample sales and assessments with replacement, and calculate ratio
     study indicators for each resample.
@@ -2892,6 +3230,15 @@ def _bootstrap_stacker(input_df
         Seed for the resampler. None draws fresh entropy, so the
         resulting confidence intervals differ slightly between two
         otherwise identical runs; pass a seed to make them reproducible.
+    mkt_value_proxy_header, prb_mvp_header : str, optional
+        Proxy columns resampled with each sale, so the VEI / VEM grouping
+        and the PRB regression use the study's proxy. When absent, each
+        resample builds its own proxy, as the study does.
+    mvp_sale_price_share : float
+        Sale-price share of a proxy built here.
+    vem_args : dict, optional
+        ``acceptable_inequity_level``, ``conf_level`` and ``ci_method`` for
+        the VEM.
 
     Returns
     -------
@@ -2938,6 +3285,10 @@ def _bootstrap_stacker(input_df
                         , 'asr_array': np.array(sample_df['bt_asr'])
                         , 'sale_error_array': np.array(sample_df['bt_sale_error']) if any(item in indicators for item in ['MdAPE', 'MAPE', 'FSD']) else None
                         , 'weights_array': np.array(sample_df[weights_header]) if weights_header else None
+                        , 'mkt_value_proxy_array': np.array(sample_df[mkt_value_proxy_header]) if mkt_value_proxy_header else None
+                        , 'prb_mvp_array': np.array(sample_df[prb_mvp_header]) if prb_mvp_header else None
+                        , 'mvp_sale_price_share': mvp_sale_price_share
+                        , 'vem_args': vem_args or {}
                         , 'req_significance': req_significance
                         , 'indicators': indicators
                         , 'vei_conf_level': vei_conf_level
@@ -2986,7 +3337,12 @@ def _bootstrap_analysis(input_df
                        , interpolation_method='median_unbiased'
                        , concurrency=None
                        , resample_pct=1.0
-                       , seed=None):
+                       , seed=None
+                       , mkt_value_proxy_header=None
+                       , prb_mvp_header=None
+                       , mvp_sale_price_share=DEFAULT_MVP_SALE_PRICE_SHARE
+                       , vei_percentile_method='R7'
+                       , vem_args=None):
     """
     Run bootstrapped ratio studies a pre-specified number of times, and
     from the resulting resamples calculate confidence intervals and,
@@ -3041,6 +3397,10 @@ def _bootstrap_analysis(input_df
         Seed for the resampler, passed through to `_bootstrap_stacker`.
         None draws fresh entropy, so two identical runs publish slightly
         different intervals.
+    mkt_value_proxy_header, prb_mvp_header, mvp_sale_price_share, vem_args
+        Passed through to `_bootstrap_stacker`.
+    vei_percentile_method : str, default 'R7'
+        Quantile-ranking method for each resample's VEI.
 
     Returns
     -------
@@ -3069,7 +3429,12 @@ def _bootstrap_analysis(input_df
                                                   , vei_use_log_normal_delta=vei_use_log_normal_delta
                                                   , indicators=indicators
                                                   , concurrency=concurrency
-                                                  , seed=seed)
+                                                  , seed=seed
+                                                  , vei_percentile_method=vei_percentile_method
+                                                  , mkt_value_proxy_header=mkt_value_proxy_header
+                                                  , prb_mvp_header=prb_mvp_header
+                                                  , mvp_sale_price_share=mvp_sale_price_share
+                                                  , vem_args=vem_args)
 
             except: # if there are incompatibilities with multithreading or multiprocessing
                 concurrency=None
@@ -3085,12 +3450,31 @@ def _bootstrap_analysis(input_df
                                                   , vei_use_log_normal_delta=vei_use_log_normal_delta
                                                   , indicators=indicators
                                                   , concurrency=None
-                                                  , seed=seed)
+                                                  , seed=seed
+                                                  , vei_percentile_method=vei_percentile_method
+                                                  , mkt_value_proxy_header=mkt_value_proxy_header
+                                                  , prb_mvp_header=prb_mvp_header
+                                                  , mvp_sale_price_share=mvp_sale_price_share
+                                                  , vem_args=vem_args)
 
-        for col in bootstrap_results.columns:
-            series = bootstrap_results[col].copy()
-            series.sort_values(inplace=True)
-            series.reset_index(inplace=True, drop=True)
+        # Only the requested indicators' numeric result columns get an
+        # interval. A resample also returns labels (`VEI_conclusion`,
+        # `Inequity_conclusion`) and by-products of the shared calculations
+        # (e.g. `Weighted_Mean` from the Gini block), none of which were asked
+        # for and some of which cannot be put through a percentile at all.
+        # Lazy import
+        from ratio_study.confint import bootstrap_ci_result_columns
+        wanted = [c for c in bootstrap_ci_result_columns(indicators) if c in bootstrap_results.columns]
+        for col in wanted:
+            series = pd.to_numeric(bootstrap_results[col], errors='coerce')
+            # A resample can leave an indicator undefined (a VEI or VEM on a
+            # draw too small to group); those draws carry no information
+            # about the interval and would turn every percentile into NaN.
+            series = series[np.isfinite(series)]
+            if series.empty:
+                result[col + '_ci'] = (np.nan, np.nan)
+                continue
+            series = series.sort_values().reset_index(drop=True)
             if ci_only == False and 'Pvalue' not in col:
                 series_median = series.median()
                 series_mean = series.mean()

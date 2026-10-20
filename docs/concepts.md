@@ -1,7 +1,7 @@
 # Concepts
 
 What the indicators mean, which one the Standard prefers, and where the package
-goes beyond it. Aligned to the IAAO **Standard on Ratio Studies, September
+goes beyond it. Aligned to the IAAO **Standard on Ratio Studies, October
 2026** — a complete revision of the 2013 Standard.
 
 ---

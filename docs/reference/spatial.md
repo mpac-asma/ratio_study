@@ -38,7 +38,7 @@ lat_col, long_col : str, default 'latitude', 'longitude'
 
 ```python
 local_moran(df=None, ratio=None, lat_col='latitude', long_col='longitude', height=700,
-            dot_size=40, opacity=0.4)
+            dot_size=40, opacity=0.4, popup_cols=None, edge_dot_scale=2.0)
 ```
 
 Calculate the local Moran/Getis-Ord statistic and visually plot
@@ -48,11 +48,13 @@ Parameters
 ----------
 df : DataFrame
     Sales DataFrame to plot. Must contain ``ratio``, ``lat_col`` and
-    ``long_col``. Any of ``roll_num``, ``inst_num``, ``saledate``,
-    ``saletype``, ``sale_amt``, ``r_enbhd_condo`` or ``r_hnbhd_condo``
-    that are present are carried through to the map tooltip.
+    ``long_col``, plus every column named in ``popup_cols``.
 ratio : str
     Ratio to test for local spatial auto-correlation.
+popup_cols : list of str, optional
+    Columns of ``df`` to show in the feature-properties pane, ahead of
+    the computed ``Z_Value``, ``P_Value``, ``category`` and ``flag``.
+    Default: just ``ratio``.
 lat_col, long_col : str, default 'latitude', 'longitude'
     Coordinate columns in ``df``.
 height : int or str, default ``DEFAULT_MAP_HEIGHT`` (700)
@@ -62,6 +64,10 @@ dot_size : float, default ``DEFAULT_DOT_SIZE`` (40)
     ``radius_scale`` for the dots. See :func:`ratio_map`.
 opacity : float, default ``DEFAULT_DOT_OPACITY`` (0.4)
     Fill opacity of the dots, 0 to 1. See :func:`ratio_map`.
+edge_dot_scale : float, default ``DEFAULT_EDGE_DOT_SCALE`` (2.0)
+    Radius multiple for the 99 % hot and cold spots. The 95 % and 90 %
+    classes step down linearly toward `dot_size`, which is where the
+    not-significant dots are drawn. ``1`` draws every dot the same size.
 
 Returns
 -------
@@ -87,12 +93,14 @@ A real browser tab has none of those constraints: the map gets the whole
 window, and the file keeps working after the kernel stops.
 
 The written file is self-contained (the map data is inlined), so it can be
-emailed or attached to a report.
+emailed or attached to a report. Given a panel, the page also carries the
+panel's legend, as a card over the bottom-left corner of the map.
 
 Parameters
 ----------
 panel_or_map : lonboard.Map or ipywidgets.VBox
-    A map, or the panel returned by :func:`ratio_map` / :func:`local_moran`.
+    A map, or the panel returned by :func:`ratio_map`, :func:`vem_map` or
+    :func:`local_moran`. A bare map is exported without a legend.
 filename : str or Path, optional
     Where to write. Defaults to a uniquely named file in the system
     temporary directory.
@@ -127,8 +135,9 @@ pass ``open_browser=False``::
 ```python
 ratio_map(df=None, column=None, groupby=None, n_bins=5, lat_col='latitude',
           long_col='longitude', height=700, *, dot_size=40, opacity=0.4,
-          colour_code_by='iqr', iqr_bands=(1.5, 3.0), iqr_log_transform=True,
-          iqr_min_cod=0, mad_bands=(3.5, 5.0), standard_bands=(0.1, 0.25))
+          edge_dot_scale=2.0, colour_code_by='iqr', iqr_bands=(1.5, 3.0),
+          iqr_log_transform=True, iqr_min_cod=0, mad_bands=(3.5, 5.0),
+          standard_bands=(0.1, 0.25), popup_cols=None)
 ```
 
 Display ratios on an interactive map, coloured by how each point's ASR
@@ -189,6 +198,12 @@ opacity : float, default ``DEFAULT_DOT_OPACITY`` (0.4)
     hundred sales is visibly darker than a patch of five, and the
     basemap stays legible underneath. Pass ``1`` for the solid dots the
     maps drew before this was an argument.
+edge_dot_scale : float, default ``DEFAULT_EDGE_DOT_SCALE`` (2.0)
+    Radius multiple for dots in the outermost colour classes (red / dark
+    blue; the fixed tails under ``'quantile'``). The drifting ring is
+    drawn halfway between, and the central band at `dot_size` itself, so
+    the outliers stand out by size as well as colour. ``1`` draws every
+    dot the same size.
 colour_code_by : {'iqr', 'mad', 'standard', 'quantile'}, default 'iqr'
     How the five colours are assigned.
 
@@ -224,6 +239,14 @@ mad_bands : tuple of float, default ``DEFAULT_MAD_BANDS`` (3.5, 5.0)
     than `iqr_bands` because the MAD is a much smaller unit than the
     IQR: on a roughly normal sample the IQR is about 2.7 MADs, so 1.5
     MADs would band a fifth of an ordinary roll as drifting.
+popup_cols : list of str, optional
+    Columns to show in the feature-properties pane. Choose from the group
+    label, ``median``, ``mean``, ``min``, ``max``, ``sale_count`` and
+    ``colour_band`` (``category`` for ``colour_code_by='quantile'``); with
+    no ``groupby`` any column of ``df`` works too. Default: all of them.
+    The statistics display as ``'median of <column>'`` etc.; with no
+    ``groupby``, or a ``groupby`` unique per record, they all display as
+    plain ``<column>``, since the statistic of one record is itself.
 standard_bands : tuple of float, default ``DEFAULT_STANDARD_BANDS`` (0.10, 0.25)
     ``(inner, outer)`` proportions of the median for
     ``colour_code_by='standard'`` -- so by default grey within 10 % of
@@ -257,7 +280,7 @@ open_map_in_browser : the export the button calls, usable from a script.
 vem_map(df=None, assessment_header=None, market_value_header=None, asr_col=None,
         lat_col='latitude', long_col='longitude', quantiles=None, window_size=None,
         conf_level=0.9, ci_method='binom', acceptable_inequity_level=0.1, strict=False,
-        height=700, dot_size=40, opacity=0.4)
+        height=700, dot_size=40, opacity=0.4, popup_cols=None, edge_dot_scale=2.0)
 ```
 
 Map each sale by whether its local (moving) median ASR is inside the band.
@@ -302,6 +325,14 @@ dot_size : float, default ``DEFAULT_DOT_SIZE`` (40)
     ``radius_scale`` for the dots. See :func:`ratio_map`.
 opacity : float, default ``DEFAULT_DOT_OPACITY`` (0.4)
     Fill opacity of the dots, 0 to 1. See :func:`ratio_map`.
+popup_cols : list of str, optional
+    Columns of ``df`` to show in the feature-properties pane, ahead of
+    the computed ``local_median``, ``vem_verdict`` and ``vem_flag``.
+    Default: ``market_value_header``, ``assessment_header`` and the ratio
+    column.
+edge_dot_scale : float, default ``DEFAULT_EDGE_DOT_SCALE`` (2.0)
+    Radius multiple for the red and blue (out-of-band) dots; green dots
+    are drawn at `dot_size`. ``1`` draws every dot the same size.
 
 Returns
 -------

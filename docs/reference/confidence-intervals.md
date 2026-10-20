@@ -6,16 +6,16 @@ Bootstrap and Appendix D closed-form interval estimators.
 
 ## Contents
 
-- [`cod_ci`](#cod-ci) — Confidence interval for the Coefficient of Dispersion (Exposure Draft
+- [`cod_ci`](#cod-ci) — Confidence interval for the Coefficient of Dispersion (IAAO Standard
 - [`compute_median_ci`](#compute-median-ci) — Confidence interval for the sample median of a ratio-study sample.
 - [`distribution_analysis`](#distribution-analysis) — Build every requested distribution-based confidence interval for one
-- [`mean_ci`](#mean-ci) — Confidence interval for the mean ratio (Exposure Draft D.1).
-- [`median_ci_clapp`](#median-ci-clapp) — Small-sample binomial confidence interval for the median (Exposure
+- [`mean_ci`](#mean-ci) — Confidence interval for the mean ratio (IAAO Standard D.1).
+- [`median_ci_clapp`](#median-ci-clapp) — Small-sample binomial confidence interval for the median (IAAO
 - [`median_ci_distribution`](#median-ci-distribution) — Median confidence interval, picking the formula the sample size calls
-- [`median_ci_rank`](#median-ci-rank) — Large-sample rank confidence interval for the median (Exposure
+- [`median_ci_rank`](#median-ci-rank) — Large-sample rank confidence interval for the median (IAAO
 - [`normalize_ci_args`](#normalize-ci-args) — Resolve the confidence-interval options of `ratios` / `ratios_report`
 - [`prd_ci`](#prd-ci) — Confidence interval for PRD, the price-related differential.
-- [`weighted_mean_ci`](#weighted-mean-ci) — Confidence interval for the weighted mean ratio (Exposure Draft D.3;
+- [`weighted_mean_ci`](#weighted-mean-ci) — Confidence interval for the weighted mean ratio (IAAO Standard D.3;
 
 ---
 
@@ -25,7 +25,7 @@ Bootstrap and Appendix D closed-form interval estimators.
 cod_ci(asr, conf_level=0.95)
 ```
 
-Confidence interval for the Coefficient of Dispersion (Exposure Draft
+Confidence interval for the Coefficient of Dispersion (IAAO Standard
 D.6; Bonett and Seier 2006).
 
 Measures the typical absolute distance from the median, stabilises it
@@ -85,8 +85,8 @@ All three place the bounds at a rank distance of about
 differ only in how that distance is turned into a value:
 
 1. **Hyndman-Fan percentile rank** (``method='R6'`` or
-   ``method='R7'``) -- the form prescribed by the IAAO Exposure Draft
-   (May 2026) Section E, Appendix D.2, and Gloudemans & Almy (2011)
+   ``method='R7'``) -- the form prescribed by the IAAO Standard on Ratio Studies
+   (October 2026) Appendix D.2, and Gloudemans & Almy (2011)
    p. 365. The interval is read off as the percentile ranks
    ``p = 0.5 -/+ z / (2 * sqrt(n))`` of the data, with ``p`` mapped to
    a position by ``h = p * (n + 1)`` (R6) or ``h = p * (n - 1) + 1``
@@ -114,7 +114,7 @@ conf_level : float, default 0.9
 method : {'binom', 'R6', 'R7'}, default 'binom'
     CI family, as described above. ``'binom'`` is the default and is
     what ``vem`` and the other internal callers use; ``'R6'`` /
-    ``'R7'`` follow the draft's percentile-rank presentation and are
+    ``'R7'`` follow the Standard's percentile-rank presentation and are
     what ``vei_analysis`` uses, matching its ``percentile_method``.
 
 Returns
@@ -208,7 +208,7 @@ dict
 mean_ci(asr, conf_level=0.95, weights=None)
 ```
 
-Confidence interval for the mean ratio (Exposure Draft D.1).
+Confidence interval for the mean ratio (IAAO Standard D.1).
 
 ``xbar +/- t(alpha/2, n-1) * s / sqrt(n)``: the sample standard
 deviation over the root of the sample size, scaled by the two-tailed
@@ -246,8 +246,8 @@ Examples
 median_ci_clapp(asr, conf_level=0.95)
 ```
 
-Small-sample binomial confidence interval for the median (Exposure
-Draft D.4, Tables D.4.1 and D.4.2; Clapp 1989).
+Small-sample binomial confidence interval for the median (IAAO
+Standard D.4, Tables D.4.1 and D.4.2; Clapp 1989).
 
 Each bound is a weighted average of two adjacent order statistics,
 with the weights read from the published table for the sample size.
@@ -275,7 +275,7 @@ dict or None
 
 Examples
 --------
-The worked example from Exposure Draft D.4 (n = 17, 95 %):
+The worked example from IAAO Standard D.4 (n = 17, 95 %):
 
 >>> ratios = [0.629, 0.641, 0.658, 0.693, 0.695, 0.717, 0.787, 0.789,
 ...           0.820, 0.848, 0.880, 0.895, 0.933, 0.947, 1.028, 1.035,
@@ -293,7 +293,7 @@ median_ci_distribution(asr, conf_level=0.95, messages=None)
 ```
 
 Median confidence interval, picking the formula the sample size calls
-for (Exposure Draft D.2 and D.4).
+for (IAAO Standard D.2 and D.4).
 
 ``n <= 30`` uses the exact binomial tables of D.4; a larger sample
 uses the rank formula of D.2. A small sample at a confidence level
@@ -325,8 +325,8 @@ tuple
 median_ci_rank(asr, conf_level=0.95)
 ```
 
-Large-sample rank confidence interval for the median (Exposure
-Draft D.2).
+Large-sample rank confidence interval for the median (IAAO
+Standard D.2).
 
 Counts ``j`` ranks out from the middle of the sorted ratios, where
 ``j = z * sqrt(n) / 2`` for an odd sample and ``j = z * sqrt(n) / 2 +
@@ -342,7 +342,7 @@ asr : array-like
 conf_level : float, default 0.95
     Confidence level, as a fraction or a percentage. ``z`` is the
     normal deviate for it -- 1.960 at 95 %, 1.645 at 90 %, the values
-    the draft quotes.
+    the Standard quotes.
 
 Returns
 -------
@@ -355,7 +355,7 @@ Notes
 -----
 Rounding ``j`` up widens the interval, so the achieved coverage is at
 or above the nominal level -- the conservative direction, and the one
-the draft prescribes ("if the result from step 2 is not an integer,
+the Standard prescribes ("if the result from step 2 is not an integer,
 round up").
 
 ---
@@ -411,7 +411,7 @@ ci_seed : int, optional
     the bootstrap uses it; the distribution formulas are exact.
 ci_mode : {'bootstrap', 'distribution'}, optional
     Which family of interval to build. ``'distribution'`` (the default)
-    uses the closed-form formulas of the IAAO Exposure Draft (May 2026)
+    uses the closed-form formulas of the IAAO Standard on Ratio Studies (October 2026)
     Appendix D; ``'bootstrap'`` resamples. The mode decides
     which indicators can carry an interval at all --
     `CI_SUPPORTED_INDICATORS` for the bootstrap,
@@ -422,12 +422,11 @@ study_indicators : sequence of str, optional
     Indicators the study itself computes. The CI indicator list is
     intersected with these, since a ``<name>_ci`` column with no
     ``<name>`` column beside it would be unreadable. When the caller
-    names the CI indicators themselves and the mode is
-    ``'distribution'``, the study takes on the missing indicator
-    instead of losing the interval -- each closed form is one pass
-    over the ratios -- and the names to add come back as
-    ``'ci_study_indicator_additions'``. Otherwise the interval is
-    dropped, with a message when it was explicitly requested.
+    names the CI indicators themselves, in either mode, the study
+    takes on any missing indicator instead of losing the interval,
+    and the names to add come back as
+    ``'ci_study_indicator_additions'``. A default CI list is only
+    intersected, so it never widens the study.
 has_groups : bool, default False
     Whether the study has a `group_by`. Per-group CIs are switched
     off when it does not.
@@ -468,7 +467,7 @@ prd_ci(assessment, market_value, conf_level=0.95, weights=None)
 
 Confidence interval for PRD, the price-related differential.
 
-Not one of the Exposure Draft's Appendix D formulas -- PRD has none --
+Not one of the IAAO Standard's Appendix D formulas -- PRD has none --
 so this is a delta-method (first-order Taylor) interval built from two
 formulas the module already has, since ``PRD = Mean / Weighted_Mean``
 (see `prd` in ``indicators.py``): `mean_ci`'s D.1 formula for the
@@ -520,7 +519,7 @@ tuple
 weighted_mean_ci(assessment, market_value, conf_level=0.95, weights=None)
 ```
 
-Confidence interval for the weighted mean ratio (Exposure Draft D.3;
+Confidence interval for the weighted mean ratio (IAAO Standard D.3;
 Fundamentals of Mass Appraisal 2011, 367, Table 10.2).
 
 The weighted mean is the ratio of the two totals,
@@ -531,7 +530,7 @@ one:
           / (Sbar * sqrt(n * (n - 1)))``
 
 and the interval is ``R +/- t(alpha/2, n-1) * SE(R)``. The numerator
-is ``sqrt(sum((A - R*S)^2))`` written out in the sums the draft's
+is ``sqrt(sum((A - R*S)^2))`` written out in the sums the Standard's
 steps 2, 10 and 11 accumulate.
 
 Parameters
@@ -554,7 +553,7 @@ tuple
 
 Notes
 -----
-The draft renders step 11 as ``(Abar / Sbar^2)(sum(S^2))``. Read that
+The Standard renders step 11 as ``(Abar / Sbar^2)(sum(S^2))``. Read that
 way, step 12 would not be the square root of ``sum((A - R*S)^2)`` that
 steps 10 and 12 imply, and the worked reference in Fundamentals of
 Mass Appraisal would not reproduce; the exponent belongs to the whole

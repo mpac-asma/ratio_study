@@ -858,29 +858,29 @@ def test_iqr_filter_runs_independently_within_groups():
 
 
 # --------------------------------------------------------------------------
-# Distribution-based confidence intervals (IAAO Exposure Draft Appendix D)
+# Distribution-based confidence intervals (IAAO Standard on Ratio Studies Appendix D)
 #
-# The draft supplies two fully worked examples -- a median interval in D.4
+# The Standard supplies two fully worked examples -- a median interval in D.4
 # and a CoD interval in D.7.1 -- so those are pinned digit for digit. The
 # other two formulas are pinned against an independent restatement of the
 # algebra rather than against the code's own output.
 # --------------------------------------------------------------------------
 
-# Table D.4.3: 17 ratios, sorted, from the draft's worked example.
-_DRAFT_D43_RATIOS = [
+# Table D.4.3: 17 ratios, sorted, from the Standard's worked example.
+_STANDARD_D43_RATIOS = [
     0.629, 0.641, 0.658, 0.693, 0.695, 0.717, 0.787, 0.789, 0.820,
     0.848, 0.880, 0.895, 0.933, 0.947, 1.028, 1.035, 1.067,
 ]
 
 
-def test_median_ci_clapp_reproduces_the_draft_worked_example():
-    """Exposure Draft D.4: n=17 at 95% gives (0.6952, 0.9326).
+def test_median_ci_clapp_reproduces_the_standard_worked_example():
+    """IAAO Standard D.4: n=17 at 95% gives (0.6952, 0.9326).
 
-    The draft walks the whole calculation: the lower bound is
+    The Standard walks the whole calculation: the lower bound is
     ``.9899 * R5 + .0101 * R6`` and the upper its mirror,
     ``.9899 * R13 + .0101 * R12``.
     """
-    out = C.median_ci_clapp(_DRAFT_D43_RATIOS, conf_level=0.95)
+    out = C.median_ci_clapp(_STANDARD_D43_RATIOS, conf_level=0.95)
     assert out['method'] == 'binomial_table'
     assert out['lower'] == pytest.approx(0.6952, abs=5e-5)
     assert out['upper'] == pytest.approx(0.9326, abs=5e-5)
@@ -927,7 +927,7 @@ def test_median_ci_clapp_flags_the_extreme_limit_samples():
 def test_median_ci_rank_matches_the_exact_ranks_rounded_outward(n):
     """D.2's j-and-count recipe should land on ``(n+1)/2 -/+ z*sqrt(n)/2``.
 
-    The draft rounds j up, i.e. outward, so the bounds are the floor of the
+    The Standard rounds j up, i.e. outward, so the bounds are the floor of the
     exact lower rank and the ceiling of the exact upper one.
     """
     from scipy.stats import norm
@@ -1029,8 +1029,8 @@ def test_weighted_mean_ci_brackets_the_weighted_mean():
     assert lower < assess.sum() / sale.sum() < upper
 
 
-def test_cod_ci_reproduces_the_draft_worked_example():
-    """Exposure Draft D.7.1: n=54 at 90% gives (0.21878, 0.28618).
+def test_cod_ci_reproduces_the_standard_worked_example():
+    """IAAO Standard D.7.1: n=54 at 90% gives (0.21878, 0.28618).
 
     Reconstructs a 54-ratio sample that hits the example's published
     inputs -- median .86778, mean .89380, sd .25822, tau .21392, and the
@@ -1503,3 +1503,35 @@ def test_the_median_intervals_never_needed_a_clamp(method):
     skewed = np.array([0.01, 0.02, 0.02, 0.03, 0.03, 40.0])
     out = compute_median_ci(skewed, 0.99, method=method)
     assert out['lower'] >= skewed.min() > 0
+
+
+# ---------------------------------------------------------------------------
+# moving_median_ci: the vectorised VEM band must equal the per-row loop
+# ---------------------------------------------------------------------------
+
+def _moving_median_ci_by_loop(values, half_width, conf_level, method):
+    """What `_compute_moving_median` used to do: one `compute_median_ci` per row."""
+    rows = []
+    for i in range(len(values)):
+        ci = compute_median_ci(values[max(0, i - half_width):i + half_width + 1],
+                               conf_level, method=method)
+        rows.append((ci['median'], ci['lower'], ci['upper']))
+    return np.array(rows).T
+
+
+@pytest.mark.parametrize('method', ['binom', 'R6', 'R7'])
+@pytest.mark.parametrize('total, half_width', [
+    (1, 3), (2, 1), (5, 0), (10, 2), (31, 15), (60, 7), (101, 50),
+    (500, 3), (2000, 500), (40, 100),
+])
+@pytest.mark.parametrize('conf_level', [0.8, 0.9, 95])
+def test_moving_median_ci_equals_the_per_row_loop(method, total, half_width, conf_level):
+    # Exact equality, not approximate: the vectorised path reads the same
+    # order statistics and combines them with the same arithmetic.
+    rng = np.random.default_rng(total * 7 + half_width)
+    values = rng.lognormal(0, 0.15, total)
+    if total > 4:
+        values[::7] = values[3]  # ties
+    expected = _moving_median_ci_by_loop(values, half_width, conf_level, method)
+    got = np.array(C.moving_median_ci(values, half_width, conf_level, method))
+    assert np.array_equal(expected, got)

@@ -3,14 +3,22 @@ import pandas as pd
 import math
 import matplotlib.pyplot as plt
 from reportlab.platypus import *
+from reportlab.platypus.tableofcontents import TableOfContents
+from reportlab.pdfgen import canvas as _rl_canvas
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.utils import ImageReader
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib import colors
 from reportlab.lib.units import inch
 from reportlab.lib.styles import getSampleStyleSheet
 from typing import Optional, Union
 
+import io
 import os
 import re
+import copy
+from pathlib import Path
+from xml.sax.saxutils import escape as _xml_escape
 from datetime import datetime, timezone
 
 import traceback
@@ -227,6 +235,335 @@ def _pdf_breakdown_ratios_by_grouping(df, output_columns, select_groupings=[], r
         raise RuntimeError('error in ratio study: pdf_breakdown_ratios_by_grouping', ex)
 
 # ---------------------------------------------------------------------------------------------------------------------
+# PDF branding: logo, watermark, page numbers, cover and index
+# ---------------------------------------------------------------------------------------------------------------------
+
+_LOGO_POSITIONS = ('top_left', 'top_center', 'top_right')
+_NUMBER_POSITIONS = ('bottom_left', 'bottom_center', 'bottom_right')
+_WATERMARK_POSITIONS = ('fill', 'center', 'top_left', 'top_right', 'bottom_left', 'bottom_right')
+_PAGE_MARGIN_X = 42
+
+
+def _check_image(path, what):
+    """Return ``path`` as a string after checking that it is a readable image file."""
+    if path is None or str(path) == '':
+        raise ValueError(f'{what}: an image file path is required')
+    if not os.path.isfile(str(path)):
+        raise FileNotFoundError(f'{what}: image file not found: {path}')
+    try:
+        from PIL import Image as _PILImage
+        with _PILImage.open(str(path)) as img:
+            img.verify()
+    except Exception as ex:
+        raise ValueError(f'{what}: {path} is not a readable image file ({ex})') from ex
+    return str(path)
+
+
+def _choice(value, allowed, default, what, aliases=None):
+    """Validate ``value`` against ``allowed`` (case-insensitive), with ``default`` when None."""
+    if value is None:
+        return default
+    key = str(value).strip().lower().replace('-', '_').replace(' ', '_')
+    if aliases and key in aliases:
+        key = aliases[key]
+    if key not in allowed:
+        raise ValueError(f'{what}: {value!r} is not valid; choose one of {list(allowed)}')
+    return key
+
+
+def _as_options(value, what, shorthand_key=None):
+    """Expand a shorthand (``True``, a path) into an options dict; ``None`` when disabled."""
+    if value is None or value is False:
+        return None
+    if isinstance(value, dict):
+        return dict(value)
+    if value is True:
+        return {}
+    if shorthand_key and isinstance(value, (str, Path)):
+        return {shorthand_key: value}
+    raise ValueError(f'{what}: expected a dict, True/False or a file path, got {type(value).__name__}')
+
+
+def _normalize_pdf_branding(logo=None, watermark=None, page_numbers=None, cover=None, index=None):
+    """
+    Validate and normalise the optional PDF branding arguments.
+
+    Every argument accepts ``None``/``False`` (off), and the shorthands
+    described in :func:`ratio_study.ratio_study.ratios_report`. Image paths
+    are checked here, so a typo fails before the study runs rather than after.
+
+    Returns
+    -------
+    dict
+        Keys ``logo``, ``watermark``, ``page_numbers``, ``cover``, ``index``;
+        each ``None`` (off) or a fully populated options dict.
+    """
+    out = {'logo': None, 'watermark': None, 'page_numbers': None, 'cover': None, 'index': None}
+
+    opts = _as_options(logo, 'pdf_logo', 'path')
+    if opts is not None:
+        out['logo'] = {
+            'path': _check_image(opts.get('path'), 'pdf_logo'),
+            'pages': _choice(opts.get('pages'), ('first', 'all'), 'first', 'pdf_logo pages',
+                             {'first_only': 'first', 'first_page': 'first', 'all_pages': 'all'}),
+            'position': _choice(opts.get('position'), _LOGO_POSITIONS, 'top_left', 'pdf_logo position',
+                                {'left': 'top_left', 'center': 'top_center', 'right': 'top_right'}),
+            'max_height': float(opts.get('max_height', 80)),
+            'max_width': float(opts.get('max_width', 300)),
+        }
+
+    opts = _as_options(watermark, 'pdf_watermark', 'path')
+    if opts is not None:
+        opacity = float(opts.get('opacity', 0.15))
+        if not 0 <= opacity <= 1:
+            raise ValueError(f'pdf_watermark opacity: {opacity} is not between 0 (invisible) and 1 (opaque)')
+        scale = float(opts.get('scale', 0.5))
+        if not 0 < scale <= 1:
+            raise ValueError(f'pdf_watermark scale: {scale} is not in (0, 1]')
+        out['watermark'] = {
+            'path': _check_image(opts.get('path'), 'pdf_watermark'),
+            'position': _choice(opts.get('position'), _WATERMARK_POSITIONS, 'fill', 'pdf_watermark position'),
+            'opacity': opacity,
+            'scale': scale,
+        }
+
+    opts = _as_options(page_numbers, 'pdf_page_numbers')
+    if opts is not None:
+        font_size = float(opts.get('font_size', 9))
+        if font_size <= 0:
+            raise ValueError(f'pdf_page_numbers font_size: {font_size} must be positive')
+        out['page_numbers'] = {
+            'position': _choice(opts.get('position'), _NUMBER_POSITIONS, 'bottom_center', 'pdf_page_numbers position',
+                                {'left': 'bottom_left', 'center': 'bottom_center', 'right': 'bottom_right'}),
+            'font_size': font_size,
+            'format': _choice(opts.get('format'), ('number', 'page_of_n'), 'number', 'pdf_page_numbers format',
+                              {'n': 'number', 'page_n': 'number', 'page_x_of_n': 'page_of_n', 'x_of_n': 'page_of_n'}),
+        }
+
+    opts = _as_options(cover, 'pdf_cover', 'title')
+    if opts is not None:
+        cover_logo = _as_options(opts.get('logo'), 'pdf_cover logo', 'path')
+        if cover_logo is not None:
+            cover_logo = {'path': _check_image(cover_logo.get('path'), 'pdf_cover logo'),
+                          'max_height': float(cover_logo.get('max_height', 300)),
+                          'max_width': float(cover_logo.get('max_width', 468))}
+        authors = opts.get('authors')
+        if isinstance(authors, str):
+            authors = [authors]
+        out['cover'] = {'title': opts.get('title'), 'subtitle': opts.get('subtitle'),
+                        'authors': list(authors) if authors else [],
+                        'date': opts.get('date'), 'logo': cover_logo}
+
+    opts = _as_options(index, 'pdf_index', 'title')
+    if opts is not None:
+        if out['cover'] is None:
+            import warnings
+            warnings.warn('pdf_index needs pdf_cover; the index page was not added', stacklevel=3)
+        else:
+            out['index'] = {'title': opts.get('title')}
+    return out
+
+
+def _fit(width, height, max_width, max_height):
+    """Scale ``(width, height)`` down to fit the box, keeping the aspect ratio."""
+    ratio = min(max_width / width, max_height / height)
+    return width * ratio, height * ratio
+
+
+def _image_size(reader):
+    width, height = reader.getSize()
+    return float(width), float(height)
+
+
+def _watermark_reader(path, opacity):
+    """Image reader of the watermark with its alpha channel scaled by ``opacity``."""
+    from PIL import Image as _PILImage
+    with _PILImage.open(path) as img:
+        img = img.convert('RGBA')
+    alpha = img.getchannel('A').point(lambda a: int(round(a * opacity)))
+    img.putalpha(alpha)
+    buffer = io.BytesIO()
+    img.save(buffer, format='PNG')
+    buffer.seek(0)
+    return ImageReader(buffer)
+
+
+def _draw_watermark(canv, reader, cfg):
+    page_w, page_h = LETTER
+    img_w, img_h = _image_size(reader)
+    margin = 0.5 * inch
+    if cfg['position'] == 'fill':
+        w, h = _fit(img_w, img_h, page_w, page_h)
+        x, y = (page_w - w) / 2, (page_h - h) / 2
+    else:
+        w, h = _fit(img_w, img_h, page_w * cfg['scale'], page_h * cfg['scale'])
+        pos = cfg['position']
+        x = margin if 'left' in pos else (page_w - w - margin if 'right' in pos else (page_w - w) / 2)
+        y = margin if 'bottom' in pos else (page_h - h - margin if 'top' in pos else (page_h - h) / 2)
+    canv.drawImage(reader, x, y, w, h, mask='auto')
+
+
+def _logo_box(cfg, reader, has_label):
+    """Return ``(x, y, w, h)`` of the logo on the page."""
+    page_w, page_h = LETTER
+    img_w, img_h = _image_size(reader)
+    w, h = _fit(img_w, img_h, cfg['max_width'], cfg['max_height'])
+    top = page_h - (30 if has_label else 12)
+    pos = cfg['position']
+    x = _PAGE_MARGIN_X if pos == 'top_left' else (page_w - _PAGE_MARGIN_X - w if pos == 'top_right' else (page_w - w) / 2)
+    return x, top - h, w, h
+
+
+def _draw_page_number(canv, cfg, number, total):
+    text = f'Page {number} of {total}' if cfg['format'] == 'page_of_n' else str(number)
+    canv.saveState()
+    canv.setFont('Helvetica', cfg['font_size'])
+    y = 16
+    pos = cfg['position']
+    if pos == 'bottom_left':
+        canv.drawString(_PAGE_MARGIN_X, y, text)
+    elif pos == 'bottom_right':
+        canv.drawRightString(LETTER[0] - _PAGE_MARGIN_X, y, text)
+    else:
+        canv.drawCentredString(LETTER[0] / 2, y, text)
+    canv.restoreState()
+
+
+def _numbered_canvas_class(cfg):
+    """
+    Canvas that stamps page numbers once the page total is known.
+
+    Pages flagged ``_rs_numbered`` by the page handlers are counted; the cover
+    and the index page are not flagged, so they get no number and do not count.
+    """
+    class _NumberedCanvas(_rl_canvas.Canvas):
+        def __init__(self, *args, **kwargs):
+            self._saved_states = []
+            super().__init__(*args, **kwargs)
+
+        def _startPage(self):
+            super()._startPage()
+            self._rs_numbered = False
+
+        def showPage(self):
+            self._saved_states.append(dict(self.__dict__))
+            self._startPage()
+
+        def save(self):
+            states = self._saved_states
+            total = sum(1 for st in states if st.get('_rs_numbered'))
+            number = 0
+            for state in states:
+                self.__dict__.update(state)
+                if state.get('_rs_numbered'):
+                    number += 1
+                    _draw_page_number(self, cfg, number, total)
+                super().showPage()
+            super().save()
+    return _NumberedCanvas
+
+
+class _TocMarker(Flowable):
+    """Zero-size flowable recording the page a section starts on."""
+
+    def __init__(self, level, text):
+        super().__init__()
+        self.level, self.text = level, text
+        self.width = self.height = 0
+
+    def wrap(self, availWidth, availHeight):
+        return 0, 0
+
+    def draw(self):
+        pass
+
+
+def _find_markers(flowable):
+    if isinstance(flowable, _TocMarker):
+        return [flowable]
+    found = []
+    for child in getattr(flowable, '_content', None) or []:
+        found.extend(_find_markers(child))
+    return found
+
+
+class _ReportDoc(BaseDocTemplate):
+    """Document that feeds the index and tracks front-matter pages."""
+
+    front_pages = 0
+
+    def beforeDocument(self):
+        self.front_pages = 0
+
+    def afterFlowable(self, flowable):
+        for marker in _find_markers(flowable):
+            self.notify('TOCEntry', (marker.level, marker.text, self.page - self.front_pages))
+
+
+def _shrink_images(flowable, limit, reserve=0):
+    """Scale images taller than ``limit`` down to fit, in place, looking inside KeepTogether blocks."""
+    if isinstance(flowable, Image):
+        if flowable.drawHeight > limit - reserve:
+            ratio = (limit - reserve) / flowable.drawHeight
+            flowable.drawWidth *= ratio
+            flowable.drawHeight *= ratio
+        return flowable
+    content = getattr(flowable, '_content', None)
+    if content:
+        # a caption and spacer share the page with the image
+        extra = 60 if any(isinstance(c, Paragraph) for c in content) else 0
+        for child in content:
+            _shrink_images(child, limit, reserve + extra)
+    return flowable
+
+
+def _pdf_clean_text(text):
+    return _xml_escape(re.sub(r'<[^>]+>', '', str(text)))
+
+
+def _cover_date_text(value):
+    from datetime import date
+    if value is None or value == '':
+        value = date.today()
+    if isinstance(value, (datetime, date)):
+        return f'{value:%B} {value.day}, {value.year}'
+    return str(value)
+
+
+def _draw_cover(canv, cfg, default_title):
+    """Paint the cover page directly on the canvas."""
+    page_w, page_h = LETTER
+    styles = getSampleStyleSheet()
+    width = page_w - 2 * 72
+    y = page_h - 90
+    if cfg['logo']:
+        reader = ImageReader(cfg['logo']['path'])
+        img_w, img_h = _image_size(reader)
+        w, h = _fit(img_w, img_h, cfg['logo']['max_width'], cfg['logo']['max_height'])
+        canv.drawImage(reader, (page_w - w) / 2, y - h, w, h, mask='auto')
+        y -= h
+    y = min(y - 40, page_h * 0.62)
+
+    def put(text, style, gap):
+        nonlocal y
+        para = Paragraph(text, style)
+        _, ph = para.wrap(width, page_h)
+        y -= ph
+        para.drawOn(canv, 72, y)
+        y -= gap
+
+    title_style = ParagraphStyle('CoverTitle', parent=styles['Title'], fontSize=30, leading=36)
+    sub_style = ParagraphStyle('CoverSub', parent=styles['Normal'], fontSize=16, leading=20, alignment=1)
+    text_style = ParagraphStyle('CoverText', parent=styles['Normal'], fontSize=13, leading=18, alignment=1)
+    put(_pdf_clean_text(cfg['title'] or default_title), title_style, 14)
+    if cfg['subtitle']:
+        put(_pdf_clean_text(cfg['subtitle']), sub_style, 30)
+    if cfg['authors']:
+        put('<br/>'.join(_pdf_clean_text(a) for a in cfg['authors']), text_style, 30)
+    put(_pdf_clean_text(_cover_date_text(cfg['date'])), text_style, 0)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
 def _make_label_func(message):
     def add_label(canvas, message):
         canvas.saveState()
@@ -273,6 +610,12 @@ def _pdf_output(export_pdf_filepath
                , starting_comments=[]
                , ending_comments=[]
                , classification_header = None
+               , logo=None
+               , watermark=None
+               , page_numbers=None
+               , cover=None
+               , index=None
+               , report_title=None
                ):
     """
     Build and save the ratio study PDF report using reportlab/platypus.
@@ -288,6 +631,9 @@ def _pdf_output(export_pdf_filepath
         its ratios table.
     model_name : str
         Model name shown in the report title.
+    report_title : str, optional
+        Replaces the default report title (base date, "Sales Ratio Study"
+        and model name) with this exact text.
     base_date : str or int, default ''
         Base date shown as a prefix in the report title (e.g.
         ``'2026'`` or ``'2026 - Sales Ratio Study'``).
@@ -317,8 +663,30 @@ def _pdf_output(export_pdf_filepath
         after all graphs/plots. The special value ``'spacer'`` inserts
         a blank spacer instead of text.
     classification_header : str, optional, default None
-        If provided, drawn as a classification label on the first and
-        later pages of the document.
+        If provided, drawn as a classification label on every page.
+    logo : str, Path or dict, optional, default None
+        Logo drawn at the top of the report pages: an image path, or a dict
+        with ``path``, ``pages`` (``'first'`` or ``'all'``), ``position``
+        (``'top_left'``, ``'top_center'`` or ``'top_right'``) and
+        ``max_height`` / ``max_width`` in points.
+    watermark : str, Path or dict, optional, default None
+        Watermark image drawn behind the content of every report page: a
+        path, or a dict with ``path``, ``position`` (``'fill'``,
+        ``'center'``, ``'top_left'``, ``'top_right'``, ``'bottom_left'`` or
+        ``'bottom_right'``), ``opacity`` (0-1, default 0.15) and ``scale``
+        (share of the page the image may take outside ``'fill'``).
+    page_numbers : bool or dict, optional, default None
+        Page numbers: True, or a dict with ``position`` (``'bottom_left'``,
+        ``'bottom_center'`` or ``'bottom_right'``), ``font_size`` and
+        ``format`` (``'number'`` or ``'page_of_n'``).
+    cover : bool, str or dict, optional, default None
+        Cover page with ``title``, ``subtitle``, ``authors``, ``date`` and
+        its own ``logo``. It has no page number, no watermark, and is not
+        counted as a page.
+    index : bool or dict, optional, default None
+        With a cover, adds a page after it holding the title and an index of
+        sections with page numbers. Like the cover it is not numbered or
+        counted.
 
     Returns
     -------
@@ -329,14 +697,41 @@ def _pdf_output(export_pdf_filepath
     """
     try:
         _use_agg_if_headless()
+        brand = _normalize_pdf_branding(logo, watermark, page_numbers, cover, index)
+        toc_on = brand['index'] is not None
         if base_date:
             if isinstance(base_date, int): base_date = str(base_date)
         elements = []
         styles = getSampleStyleSheet()
         centered_style = styles['Normal'].clone('Centered')
         centered_style.alignment = 1
-        doc = SimpleDocTemplate(export_pdf_filepath, pagesize=LETTER, topMargin=50, bottomMargin=20, rightMargin=42, leftMargin=42)
-        title_text = ((base_date + ' - ') if base_date else '') + "Sales Ratio Study" + ((' - ' + model_name) if model_name != '' else '')
+        if report_title is not None:
+            title_text = report_title
+        else:
+            title_text = ((base_date + ' - ') if base_date else '') + "Sales Ratio Study" + ((' - ' + model_name) if model_name != '' else '')
+
+        pending_sections = []       # level-0 index entries waiting for their first flowable
+
+        def as_flowable(element):
+            return Image(element, width=700, height=400) if isinstance(element, plt.Figure) else element
+
+        def anchor(level, text, *flowables):
+            """Elements for one report block; with an index, tagged with the entries that start on it."""
+            flowables = [as_flowable(f) for f in flowables]
+            if not toc_on:
+                return flowables
+            markers = [_TocMarker(0, t) for t in pending_sections]
+            pending_sections.clear()
+            if text:
+                markers.append(_TocMarker(level, _pdf_clean_text(text)))
+            return [KeepTogether(markers + flowables)] if markers else flowables
+
+        def graph_block(graph):
+            if isinstance(graph, list):
+                block = KeepTogether([Paragraph(graph[0], centered_style), ConditionalSpacer(0, 0.2 * inch), as_flowable(graph[1])])
+                return anchor(1, graph[0], block)
+            return anchor(1, None, ConditionalSpacer(0, 0.5 * inch), graph)
+
         elements.append(Paragraph(title_text, styles['Title']))
         elements.append(KeepTogether(ConditionalSpacer(0, 0.4 * inch)))
         if starting_comments:
@@ -349,13 +744,15 @@ def _pdf_output(export_pdf_filepath
                     elements.append(Paragraph(comment, styles['Normal']))
 
         if len(ratio_tables_dfs.keys()) > 0:
+            pending_sections.append('Ratio tables')
             if 'Overall' in ratio_tables_dfs:
                 overall_ratios = ratio_tables_dfs.pop('Overall')
                 if 'Overall' in pdf_grouping_aliases.keys():
                     overall_alias = pdf_grouping_aliases['Overall']
                 else:
                     overall_alias = 'Overall'
-                elements.append(Paragraph("Time Adjusted Sales Ratios - " + overall_alias, styles['Heading3']))
+                heading = "Time Adjusted Sales Ratios - " + overall_alias
+                elements.extend(anchor(1, heading, Paragraph(heading, styles['Heading3'])))
                 elements.append(_pdf_create_table(overall_ratios))
                 elements.append(KeepTogether(ConditionalSpacer(0, 0.2 * inch)))
             for key in ratio_tables_dfs:
@@ -366,72 +763,123 @@ def _pdf_output(export_pdf_filepath
                 else:
                     group_alias = key
 
-                elements.append(Paragraph("Time Adjusted Sales Ratios by " + group_alias, styles['Heading3']))
+                heading = "Time Adjusted Sales Ratios by " + group_alias
+                elements.extend(anchor(1, heading, Paragraph(heading, styles['Heading3'])))
                 elements.append(_pdf_create_table(group_ratios))
                 elements.append(KeepTogether(ConditionalSpacer(0, 0.2 * inch)))
-        # overall graphs
-        if overall_graphs:
-            for graph in overall_graphs:
-                if isinstance(graph, list):
-                    elements.append(KeepTogether([Paragraph(graph[0], centered_style), ConditionalSpacer(0, 0.2 * inch), graph[1]]))
-                else:
-                    elements.append((ConditionalSpacer(0, 0.5 * inch)))
-                    elements.append(graph)
 
-        # group graphs
-        if group_graphs:
-            for graph in group_graphs:
-                try:
-                    if isinstance(graph, list):
-                        elements.append(KeepTogether([Paragraph(graph[0], centered_style), ConditionalSpacer(0, 0.2 * inch), graph[1]]))
-                    else:
-                        elements.append((ConditionalSpacer(0, 0.5 * inch)))
-                        elements.append(graph)
-                except:
-                    print(1)
+        for section_title, section_graphs in (('Overall graphs', overall_graphs)
+                                               , ('Group graphs', group_graphs)):
+            if section_graphs:
+                pending_sections.append(section_title)
+                for graph in section_graphs:
+                    elements.extend(graph_block(graph))
 
-        # mosaic group graphs
-        if group_mosaic_graphs:
-            for graph in group_mosaic_graphs:
-                elements.append((ConditionalSpacer(0, 0.5 * inch)))
-                elements.append(graph)
-
-        # mosaic group dist_plot graphs
-        if dist_group_mosaic_graphs:
-            for graph in dist_group_mosaic_graphs:
-                elements.append((ConditionalSpacer(0, 0.5 * inch)))
-                elements.append(graph)
+        for section_title, section_graphs in (('Group mosaic graphs', group_mosaic_graphs)
+                                               , ('Group distribution mosaic graphs', dist_group_mosaic_graphs)):
+            if section_graphs:
+                pending_sections.append(section_title)
+                for graph in section_graphs:
+                    elements.extend(anchor(1, None, ConditionalSpacer(0, 0.5 * inch), graph))
 
         # lorenz plots
         if gini_lorenz_plots:
+            pending_sections.append('Lorenz curves')
             for plot in gini_lorenz_plots:
-                elements.append((ConditionalSpacer(0, 0.5 * inch)))
-                elements.append(Image(plot))
+                elements.extend(anchor(1, None, ConditionalSpacer(0, 0.5 * inch), Image(plot)))
 
         if ending_comments:
             if isinstance(ending_comments, str):
                 ending_comments = [ending_comments]
-            elements.append(KeepTogether(ConditionalSpacer(0, 1 * inch)))
+            pending_sections.append('Comments')
+            elements.extend(anchor(1, None, KeepTogether(ConditionalSpacer(0, 1 * inch))))
             for comment in ending_comments:
                 if comment == 'spacer':
                     elements.append(KeepTogether(ConditionalSpacer(0, 0.2 * inch)))
                 else:
                     elements.append(Paragraph(comment, styles['Normal']))
 
-        report_elements = []
-        for element in elements:
-            # Check if the element is an image
-            if isinstance(element, plt.Figure):
-                # Add the image to the list of flowables
-                report_elements.append(Image(element, width=700, height=400))
-            else:
-                report_elements.append(element)
-        if classification_header:
-            doc.build(report_elements
-                      , onFirstPage=_make_label_func(classification_header)
-                      , onLaterPages=_make_label_func(classification_header))
+
+        # ---- page furniture -------------------------------------------------
+        page_w, page_h = LETTER
+        left_margin = right_margin = _PAGE_MARGIN_X
+        bottom_margin = 40 if brand['page_numbers'] else 20
+        top_margin = 50
+        logo_cfg = brand['logo']
+        logo_reader = ImageReader(logo_cfg['path']) if logo_cfg else None
+        logo_top_margin = top_margin
+        if logo_cfg:
+            _, logo_y, _, _ = _logo_box(logo_cfg, logo_reader, bool(classification_header))
+            logo_top_margin = max(top_margin, page_h - logo_y + 8)
+        wm_reader = _watermark_reader(brand['watermark']['path'], brand['watermark']['opacity']) if brand['watermark'] else None
+        label_func = _make_label_func(classification_header) if classification_header else None
+        cover_title = brand['cover']['title'] if brand['cover'] and brand['cover']['title'] else title_text
+
+        def page_furniture(canv, doc, with_logo):
+            if wm_reader is not None:
+                _draw_watermark(canv, wm_reader, brand['watermark'])
+            if with_logo:
+                x, y, w, h = _logo_box(logo_cfg, logo_reader, bool(classification_header))
+                canv.drawImage(logo_reader, x, y, w, h, mask='auto')
+            if label_func:
+                label_func(canv, classification_header)
+
+        def on_cover(canv, doc):
+            _draw_cover(canv, brand['cover'], title_text)
+            if label_func:
+                label_func(canv, classification_header)
+
+        def on_front(canv, doc):
+            doc.front_pages += 1
+            page_furniture(canv, doc, with_logo=bool(logo_cfg and logo_cfg['pages'] == 'all'))
+
+        def on_body_first(canv, doc):
+            canv._rs_numbered = True
+            page_furniture(canv, doc, with_logo=bool(logo_cfg))
+
+        def on_body_later(canv, doc):
+            canv._rs_numbered = True
+            page_furniture(canv, doc, with_logo=bool(logo_cfg and logo_cfg['pages'] == 'all'))
+
+        def make_frame(top):
+            return Frame(left_margin, bottom_margin, page_w - left_margin - right_margin, page_h - top - bottom_margin, id='normal')
+
+        doc = _ReportDoc(export_pdf_filepath, pagesize=LETTER, topMargin=top_margin, bottomMargin=bottom_margin
+                         , rightMargin=right_margin, leftMargin=left_margin)
+        later_top = logo_top_margin if (logo_cfg and logo_cfg['pages'] == 'all') else top_margin
+        templates = []
+        if brand['cover']:
+            templates.append(PageTemplate(id='cover', frames=[make_frame(top_margin)], onPage=on_cover, pagesize=LETTER))
+        if brand['index']:
+            templates.append(PageTemplate(id='front', frames=[make_frame(later_top)], onPage=on_front, pagesize=LETTER))
+        templates.append(PageTemplate(id='body_first', frames=[make_frame(logo_top_margin)], onPage=on_body_first, pagesize=LETTER))
+        templates.append(PageTemplate(id='body_later', frames=[make_frame(later_top)], onPage=on_body_later, pagesize=LETTER))
+        doc.addPageTemplates(templates)
+        # The logo and page numbers shrink the frame; scale down any image that no longer fits.
+        frame_height = min(t.frames[0]._height for t in templates) - 12
+        report_elements = [_shrink_images(as_flowable(e), frame_height) for e in elements]
+
+        story = []
+        if brand['cover']:
+            story += [Spacer(1, 1), NextPageTemplate('front' if brand['index'] else 'body_first'), PageBreak()]
+        if brand['index']:
+            toc = TableOfContents()
+            toc.dotsMinLevel = 0
+            toc.levelStyles = [
+                ParagraphStyle('TOC0', fontSize=12, leading=16, leftIndent=0, spaceBefore=8, fontName='Helvetica-Bold'),
+                ParagraphStyle('TOC1', fontSize=10, leading=14, leftIndent=18),
+            ]
+            index_title = brand['index']['title'] or cover_title
+            story += [Paragraph(_pdf_clean_text(index_title), styles['Title']), Spacer(1, 0.3 * inch)
+                      , Paragraph('Index', styles['Heading2']), toc
+                      , NextPageTemplate('body_first'), PageBreak()]
+        story += [NextPageTemplate('body_later')] + report_elements
+
+        canvas_class = _numbered_canvas_class(brand['page_numbers']) if brand['page_numbers'] else _rl_canvas.Canvas
+        if toc_on:
+            doc.multiBuild(story, canvasmaker=canvas_class)
         else:
-            doc.build(report_elements)
+            doc.build(story, canvasmaker=canvas_class)
 
         for plot in gini_lorenz_plots:
             os.remove(plot)
@@ -580,6 +1028,14 @@ _UNUSABLE_SAMPLE = 5
 # derived confidence-interval / p-value columns.
 _NEVER_CHECKED = ('Level', 'Group_by', 'Count', 'Weighted_Mean')
 
+# Indicators whose ideal value *is* zero: no vertical inequity (VEI, and the
+# VEM's severity and prevalence) or no reranking (RRI). The fallback check
+# for an indicator without a standard -- "its interval includes 0" -- is a
+# finding for a bias or effect size, but for these it is the good outcome,
+# so they skip it. The VEI is judged against its band by `VEI_conclusion`.
+_ZERO_IS_IDEAL = ('VEI', 'Inequity_severity', 'Inequity_prevalence',
+                  'Reranking_Index', 'RRI')
+
 # IAAO 11.2.1 (Uniformity among Strata): a stratum's level of assessment
 # should fall within this fraction of the overall level of assessment --
 # 5 percent, not 5 percentage points.
@@ -589,6 +1045,77 @@ _STRATA_MEDIAN_UNIFORMITY_PCT = 0.05
 # assessment should differ from each other by more than this fraction --
 # 10 percent, not 10 percentage points.
 _INTERCLASS_MEDIAN_UNIFORMITY_PCT = 0.10
+
+# Statistics that can stand for a stratum's level of assessment in the two
+# checks above, in the order tried when the caller does not choose one: the
+# Median first (the Standard's preferred measure of level, 7.4), then the
+# Weighted Mean, then the Mean.
+LEVEL_OF_ASSESSMENT_STATISTICS = ('Median', 'Weighted_Mean', 'Mean')
+_LEVEL_OF_ASSESSMENT_ALIASES = {
+    'median': 'Median',
+    'mean': 'Mean',
+    'weighted_mean': 'Weighted_Mean', 'weighted mean': 'Weighted_Mean',
+    'weightedmean': 'Weighted_Mean', 'wtd_mean': 'Weighted_Mean',
+    'aggregate': 'Weighted_Mean', 'aggregate_ratio': 'Weighted_Mean',
+}
+
+
+def normalize_level_of_assessment(level_of_assessment):
+    """
+    Canonical spelling of a level-of-assessment statistic.
+
+    Parameters
+    ----------
+    level_of_assessment : str or None
+        ``'Median'``, ``'Mean'`` or ``'Weighted_Mean'``, in any case, with
+        ``'weighted mean'`` / ``'wtd_mean'`` / ``'aggregate'`` accepted for
+        the last. None means "choose automatically".
+
+    Returns
+    -------
+    str or None
+        One of `LEVEL_OF_ASSESSMENT_STATISTICS`, or None.
+
+    Raises
+    ------
+    ValueError
+        For anything else.
+    """
+    if level_of_assessment is None:
+        return None
+    key = str(level_of_assessment).strip().lower()
+    if key not in _LEVEL_OF_ASSESSMENT_ALIASES:
+        raise ValueError(
+            f'level_of_assessment={level_of_assessment!r} is not one of '
+            f'{list(LEVEL_OF_ASSESSMENT_STATISTICS)}.')
+    return _LEVEL_OF_ASSESSMENT_ALIASES[key]
+
+
+def _resolve_level_of_assessment(columns, level_of_assessment=None):
+    """
+    The statistic the between-strata checks compare, given what the table holds.
+
+    Parameters
+    ----------
+    columns : iterable of str
+        Columns of the results table.
+    level_of_assessment : str, optional
+        The caller's choice. None picks the first of
+        `LEVEL_OF_ASSESSMENT_STATISTICS` present -- the Median whenever the
+        study computes it.
+
+    Returns
+    -------
+    str or None
+        The column to compare, or None when the chosen statistic (or, for
+        None, every candidate) is missing from the table.
+    """
+    columns = set(columns)
+    chosen = normalize_level_of_assessment(level_of_assessment)
+    if chosen is not None:
+        return chosen if chosen in columns else None
+    return next((c for c in LEVEL_OF_ASSESSMENT_STATISTICS if c in columns), None)
+
 
 # Leading signed number of a cell, so a marker or a percent sign can follow.
 _LEADING_NUMBER = re.compile(r'-?\s*\d*\.?\d+')
@@ -684,7 +1211,8 @@ def _standard_band(standard,
     Statistics drawn from a stratum get more latitude than the population
     ones, per IAAO guidance: the CoD's upper bound is 5 points higher, and
     a stratum's median ASR (its level of assessment) is compared with the
-    overall level of assessment +/- 5% rather than with the fixed band.
+    overall level of assessment +/- 5 percent (IAAO 11.2.1) rather than
+    with the fixed band.
 
     Parameters
     ----------
@@ -718,9 +1246,26 @@ def _standard_band(standard,
         return (low, round(high + 0.05, 2))
     if col == 'Median':
         if compare_groups_median_to_overall_median and overall_median is not None:
-            return (round(overall_median - 0.05, 4), round(overall_median + 0.05, 4))
+            # 5 percent of the overall level, not 5 percentage points (IAAO
+            # 11.2.1); the two differ whenever the overall level is not 1.
+            return (round(overall_median * (1 - _STRATA_MEDIAN_UNIFORMITY_PCT), 4),
+                    round(overall_median * (1 + _STRATA_MEDIAN_UNIFORMITY_PCT), 4))
         return (low, round(high + 0.05, 2))
     return (low, high)
+
+
+def _usable_ci(ci):
+    """
+    True for a ``(low, high)`` interval with two finite bounds.
+
+    A blank interval can arrive as ``(nan, nan)`` -- a tuple, so an
+    ``isinstance`` test passes it -- and every comparison against NaN is
+    False, which would read a NaN gap as a failure.
+    """
+    if not isinstance(ci, tuple) or len(ci) != 2:
+        return False
+    low, high = _as_float(ci[0]), _as_float(ci[1])
+    return low is not None and high is not None and math.isfinite(low) and math.isfinite(high)
 
 
 def _strata_median_pct_change(group_median, group_ci, overall_median, overall_ci):
@@ -902,14 +1447,16 @@ def _add_comments(df,
                   results_cols,
                   results_format,
                   skip,
-                  compare_groups_median_to_overall_median=True,
+                  compare_groups_median_to_overall_median=None,
                   std_non_acceptable_symbol=chr(8869),
                   small_sample_symbol=chr(248),
                   min_count_threshold=15,
                   ci_conf_level=None,
                   comments_header='Comments Ratio Study Standard metrics',
                   VE_bundle_comments=False,
-                  add_binaries=True):
+                  add_binaries=True,
+                  strata_uniformity_checks=True,
+                  level_of_assessment=None):
     """
     Add descriptive comments and acceptance markers to indicators that are
     not statistically significant or fall outside assessment standards.
@@ -940,26 +1487,8 @@ def _add_comments(df,
     skip : list of str
         Columns in ``results_cols`` to be skipped from the
         significance/standards checks.
-    compare_groups_median_to_overall_median : bool, default True
-        Gates the horizontal-equity checks, both only meaningful when a
-        `group_by` produced a ``'Group'`` column:
-
-        * Stratum vs. overall, IAAO 11.2.1 (uniformity among strata) -- a
-          group's ``'Median'`` is checked against the overall ``'Median'``
-          instead of the fixed ``assessment_standards`` range. When both
-          ``'Median_ci'`` values are available, the check compares the two
-          confidence intervals and flags a stratum only when the gap
-          between their nearest bounds exceeds 5 percent of the overall's
-          bound (see :func:`_strata_median_pct_change`); otherwise it falls
-          back to a fixed +/- 5 percentage-point band around the overall
-          ``'Median'`` point estimate.
-        * Stratum vs. stratum, IAAO 11.2.2 (uniformity between classes) --
-          every pair of strata sharing a ``'Level'`` (grouping dimension)
-          is compared the same way, and flagged when the gap between their
-          nearest ``'Median_ci'`` bounds exceeds 10 percent of the lower
-          stratum's own bound (see :func:`_interclass_median_pct_change`).
-          Unlike the first check, there is no fixed-band fallback here: a
-          pair without both confidence intervals is not compared.
+    compare_groups_median_to_overall_median : bool, optional
+        Older name for `strata_uniformity_checks`; when given, it wins.
     std_non_acceptable_symbol : str, default chr(8869)
         Marker symbol appended to a formatted value when its indicator
         fails a significance or standards check.
@@ -992,6 +1521,33 @@ def _add_comments(df,
         interval and are still filled in for small samples; NA where the
         indicator or its standard is missing. See
         :func:`_acceptance_binaries`.
+    strata_uniformity_checks : bool, default True
+        Run the horizontal-equity checks between strata. Both only apply
+        when a `group_by` produced a ``'Group'`` column:
+
+        * Stratum vs. overall, IAAO 11.2.1 (uniformity among strata) -- a
+          stratum's level of assessment should be within 5 percent (not 5
+          percentage points) of the overall level. With both confidence
+          intervals available, the gap between their nearest bounds is
+          taken as a percent of the overall's bound (see
+          :func:`_strata_median_pct_change`); otherwise the two point
+          estimates are compared, as a percent of the overall level.
+        * Stratum vs. stratum, IAAO 11.2.2 (uniformity between classes) --
+          every pair of strata sharing a ``'Level'`` (grouping dimension)
+          is flagged when the gap between their nearest confidence bounds
+          exceeds 10 percent of the lower stratum's bound (see
+          :func:`_interclass_median_pct_change`). The Standard's "probably
+          differ" is a statement about the intervals, so a pair without
+          both is not compared.
+
+        When the Median is not the level statistic, a stratum Median is
+        held to the fixed ``assessment_standards`` band like any other
+        indicator.
+    level_of_assessment : {'Median', 'Mean', 'Weighted_Mean'}, optional
+        Statistic standing for each stratum's level of assessment in those
+        checks. Default: the Median when the table has it, else the
+        Weighted Mean, else the Mean. A named statistic missing from the
+        table switches the checks off.
 
     Returns
     -------
@@ -1016,11 +1572,6 @@ def _add_comments(df,
             )
         df = df.copy()
 
-        cols_to_check = [col for col in results_cols
-                         if col not in skip
-                         and col not in _NEVER_CHECKED
-                         and '_ci' not in col
-                         and 'Pvalue' not in col]
 
         # Two different levels reach this function and they are not
         # interchangeable: `req_significance` is the p-value threshold the
@@ -1034,16 +1585,35 @@ def _add_comments(df,
             from ratio_study.confint import confidence_level_as_fraction
             ci_pct = round(confidence_level_as_fraction(ci_conf_level, 'ci_conf_level') * 100)
         interval_label = f'{ci_pct}% confidence interval' if ci_pct else 'confidence interval'
+
+        if compare_groups_median_to_overall_median is not None:
+            strata_uniformity_checks = bool(compare_groups_median_to_overall_median)
+        level_stat = (_resolve_level_of_assessment(df.columns, level_of_assessment)
+                      if strata_uniformity_checks else None)
+        overall_level = overall_level_ci = None
+        if level_stat is not None:
+            overall_rows = df['Level'] == 'Overall'
+            if overall_rows.any():
+                overall_level = _as_float(df.loc[overall_rows, level_stat].iloc[0])
+                if f'{level_stat}_ci' in df.columns:
+                    candidate = df.loc[overall_rows, f'{level_stat}_ci'].iloc[0]
+                    overall_level_ci = candidate if _usable_ci(candidate) else None
+        # The Median's own stratum band follows the overall Median only when
+        # the Median is the level statistic; otherwise it is the fixed band.
+        median_vs_overall = level_stat == 'Median'
+
+        # `Weighted_Mean` is otherwise never checked; as the level statistic
+        # it takes part in the stratum comparison, and only in that.
+        cols_to_check = [col for col in results_cols
+                         if col not in skip
+                         and (col not in _NEVER_CHECKED or col == level_stat)
+                         and '_ci' not in col
+                         and 'Pvalue' not in col]
         overall_median = None
         if 'Median' in df.columns:
             overall_medians = df.loc[df['Level'] == 'Overall', 'Median']
             if len(overall_medians):
                 overall_median = _as_float(overall_medians.iloc[0])
-        overall_median_ci = None
-        if 'Median_ci' in df.columns:
-            overall_median_cis = df.loc[df['Level'] == 'Overall', 'Median_ci']
-            if len(overall_median_cis) and isinstance(overall_median_cis.iloc[0], tuple):
-                overall_median_ci = overall_median_cis.iloc[0]
 
         comments = {}           # row -> list of comment fragments
         ve_notes = {}           # row -> list of vertical-equity fragments
@@ -1109,43 +1679,49 @@ def _add_comments(df,
                             bundle.append(f'VEI: {value}')
                     continue
 
-                if (col == 'Median' and is_group
-                        and compare_groups_median_to_overall_median
-                        and overall_median is not None):
-                    group_median = _as_float(value)
-                    group_ci = df.at[idx, 'Median_ci'] if 'Median_ci' in df.columns else None
-                    pct_change = None
-                    if (group_median is not None
-                            and isinstance(group_ci, tuple)
-                            and isinstance(overall_median_ci, tuple)):
-                        pct_change = _strata_median_pct_change(
-                            group_median, group_ci, overall_median, overall_median_ci)
-                    if pct_change is not None:
-                        if pct_change > _STRATA_MEDIAN_UNIFORMITY_PCT:
-                            notes.append(
-                                'Median suggests a review under IAAO 11.2.1 '
-                                '(uniformity among strata): '
-                                f'{round(pct_change * 100, 2)}% different from '
-                                'the overall level of assessment, more than the '
-                                f'{round(_STRATA_MEDIAN_UNIFORMITY_PCT * 100)}% '
-                                f'limit (compared at the nearest bounds of the '
-                                f'two {interval_label}s)'
-                            )
-                            flags.append(col)
+                # IAAO 11.2.1 (uniformity among strata): the stratum's level
+                # of assessment against the overall level, within 5 percent.
+                if col == level_stat and is_group and overall_level is not None:
+                    group_level = _as_float(value)
+                    if group_level is None:
                         continue
-                    # No usable confidence interval on one side or the
-                    # other: fall back to the fixed-band comparison below.
+                    group_ci = df.at[idx, f'{col}_ci'] if f'{col}_ci' in df.columns else None
+                    if _usable_ci(group_ci) and overall_level_ci is not None:
+                        pct_change = _strata_median_pct_change(
+                            group_level, group_ci, overall_level, overall_level_ci)
+                        basis = f'compared at the nearest bounds of the two {interval_label}s'
+                    else:
+                        # No interval on one side or the other: the point
+                        # estimates, still as a percent of the overall level.
+                        pct_change = (abs(group_level - overall_level) / overall_level
+                                      if overall_level else None)
+                        basis = 'point estimates, without confidence intervals on both sides'
+                    if pct_change is not None and pct_change > _STRATA_MEDIAN_UNIFORMITY_PCT:
+                        notes.append(
+                            f'{col} suggests a review under IAAO 11.2.1 '
+                            '(uniformity among strata): '
+                            f'{round(pct_change * 100, 2)}% different from '
+                            'the overall level of assessment, more than the '
+                            f'{round(_STRATA_MEDIAN_UNIFORMITY_PCT * 100)}% '
+                            f'limit ({basis})'
+                        )
+                        flags.append(col)
+                    continue
+                if col in _NEVER_CHECKED:
+                    continue
 
                 band = _standard_band(
                     _standard_for(col, assessment_standards), col,
                     is_group,
                     overall_median=overall_median,
-                    compare_groups_median_to_overall_median=compare_groups_median_to_overall_median,
+                    compare_groups_median_to_overall_median=median_vs_overall,
                 )
                 confidence_interval = df.at[idx, f'{col}_ci'] if f'{col}_ci' in df.columns else None
 
                 # Without a standard, the only check available is whether
                 # the confidence interval can rule out zero.
+                if band is None and col in _ZERO_IS_IDEAL:
+                    continue
                 if band is None:
                     if (isinstance(confidence_interval, tuple)
                             and confidence_interval[0] <= 0 <= confidence_interval[1]):
@@ -1195,20 +1771,19 @@ def _add_comments(df,
         # above, so it runs once every row's own comments are settled, and
         # only compares strata that share a 'Level' (grouping dimension) --
         # strata from different groupings are not peers.
-        if ('Group' in df.columns and 'Median' in df.columns
-                and compare_groups_median_to_overall_median):
+        if 'Group' in df.columns and level_stat is not None:
             for level_value in df.loc[df['Level'] != 'Overall', 'Level'].unique():
                 peers = [idx for idx in df.index
                         if df.at[idx, 'Level'] == level_value and idx not in small_samples]
                 for i, idx_a in enumerate(peers):
-                    median_a = _as_float(df.at[idx_a, 'Median'])
-                    ci_a = df.at[idx_a, 'Median_ci'] if 'Median_ci' in df.columns else None
-                    if median_a is None or not isinstance(ci_a, tuple):
+                    median_a = _as_float(df.at[idx_a, level_stat])
+                    ci_a = df.at[idx_a, f'{level_stat}_ci'] if f'{level_stat}_ci' in df.columns else None
+                    if median_a is None or not _usable_ci(ci_a):
                         continue
                     for idx_b in peers[i + 1:]:
-                        median_b = _as_float(df.at[idx_b, 'Median'])
-                        ci_b = df.at[idx_b, 'Median_ci'] if 'Median_ci' in df.columns else None
-                        if median_b is None or not isinstance(ci_b, tuple):
+                        median_b = _as_float(df.at[idx_b, level_stat])
+                        ci_b = df.at[idx_b, f'{level_stat}_ci'] if f'{level_stat}_ci' in df.columns else None
+                        if median_b is None or not _usable_ci(ci_b):
                             continue
                         pct_change = _interclass_median_pct_change(median_a, ci_a, median_b, ci_b)
                         if pct_change is None or pct_change <= _INTERCLASS_MEDIAN_UNIFORMITY_PCT:
@@ -1217,14 +1792,14 @@ def _add_comments(df,
                         limit_text = round(_INTERCLASS_MEDIAN_UNIFORMITY_PCT * 100)
                         for this_idx, other_idx in ((idx_a, idx_b), (idx_b, idx_a)):
                             comments[this_idx].append(
-                                'Median (level of assessment) does not pass IAAO 11.2.2 '
+                                f'{level_stat} (level of assessment) does not pass IAAO 11.2.2 '
                                 f'(uniformity between classes): {pct_text}% different '
                                 f"from Group {df.at[other_idx, 'Group']!r}, more than "
                                 f'the {limit_text}% limit (compared at the nearest '
                                 f'bounds of the two {interval_label}s) -- suggests a '
                                 'review regarding assessment standards'
                             )
-                            flagged[this_idx].append('Median')
+                            flagged[this_idx].append(level_stat)
 
         df[comments_header] = pd.Series(
             {idx: ' | '.join(notes) for idx, notes in comments.items()}
@@ -1237,7 +1812,7 @@ def _add_comments(df,
         if add_binaries:
             for name, column in _acceptance_binaries(
                 df, assessment_standards, overall_median=overall_median,
-                compare_groups_median_to_overall_median=compare_groups_median_to_overall_median,
+                compare_groups_median_to_overall_median=median_vs_overall,
             ).items():
                 df[name] = column
 

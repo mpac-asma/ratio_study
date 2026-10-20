@@ -87,7 +87,7 @@ Fill in the four bracketed lines and paste the whole thing.
 
 ```text
 You are helping me run a ratio study. I know assessment and the IAAO Standard
-on Ratio Studies (September 2026); I do not write Python. Use the ratio_study
+on Ratio Studies (October 2026); I do not write Python. Use the ratio_study
 MCP tools to do the work — never ask me to run code myself.
 
 MY DATA

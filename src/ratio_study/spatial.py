@@ -46,6 +46,15 @@ DEFAULT_DOT_SIZE = 40
 # stays legible underneath. Pass ``opacity=1`` for the old solid dots.
 DEFAULT_DOT_OPACITY = 0.4
 
+# Radius multiple for dots at the outer edge of a map's colour scale. The
+# edges are the finding -- far outliers, 99 % hot/cold spots, out-of-band VEM
+# stretches -- and on a dense roll they are a handful of dots among
+# thousands, so size carries the signal as well as colour (and survives a
+# reader who cannot tell the hues apart). Classes in between grow linearly
+# from 1 at the centre of the scale to this at the edge. Pass
+# ``edge_dot_scale=1`` for uniform dots, as the maps drew before.
+DEFAULT_EDGE_DOT_SCALE = 2.0
+
 
 def _as_opacity(opacity):
     """
@@ -86,6 +95,40 @@ def _as_opacity(opacity):
     return value
 
 
+def _edge_radius(level, edge_dot_scale):
+    """
+    Per-point radius multiple from its position on the colour scale.
+
+    Parameters
+    ----------
+    level : array-like
+        Distance of each point's class from the centre of the scale: 0 at
+        the centre, 1 at the outermost class. Non-finite counts as 0.
+    edge_dot_scale : float
+        Radius multiple at ``level == 1``.
+
+    Returns
+    -------
+    numpy.ndarray
+        float32 multiples, for a ScatterplotLayer's ``get_radius`` (which
+        ``radius_scale`` then multiplies, so `dot_size` keeps its meaning
+        for the central dots).
+
+    Raises
+    ------
+    ValueError
+        If `edge_dot_scale` is not a positive finite number.
+    """
+    try:
+        scale = float(edge_dot_scale)
+    except (TypeError, ValueError):
+        raise ValueError(f'edge_dot_scale must be a number, got {edge_dot_scale!r}.')
+    if not np.isfinite(scale) or scale <= 0:
+        raise ValueError(f'edge_dot_scale must be positive, got {edge_dot_scale!r}.')
+    level = np.nan_to_num(np.asarray(level, dtype=float), nan=0.0)
+    return (1.0 + (scale - 1.0) * np.clip(level, 0.0, 1.0)).astype(np.float32)
+
+
 def _extract_map(panel_or_map):
     """
     Return the lonboard Map from either a Map or a panel built by `_map_panel`.
@@ -115,6 +158,68 @@ def _extract_map(panel_or_map):
     )
 
 
+# lonboard's "Feature properties" side panel is a fixed 24rem (``w-96``) with
+# a 2fr/3fr grid, which leaves the name column about 14 characters before it
+# truncates with an ellipsis. Widen the panel and give the name column room
+# for at least 18 characters. Matched on lonboard's Tailwind class names, so
+# a lonboard release that renames them quietly reverts to the default look.
+TOOLTIP_CSS = (
+    '.bg-white.shadow-md.h-full.w-96 {width: 32rem !important; max-width: 90vw;}'
+    '.bg-white.shadow-md.h-full.w-96 tbody.grid '
+    '{grid-template-columns: calc(18ch + 2rem) minmax(0, 1fr) !important;}'
+)
+
+
+# The exported page's legend: a fixed card over the bottom-left of the map.
+# Bottom-left because lonboard puts its properties pane on the right and the
+# basemap attribution bottom-right. Capped in height and scrollable, so a
+# seven-class Moran legend never covers the map on a small window.
+LEGEND_CSS = (
+    '#rs-legend {position: fixed; left: 12px; bottom: 28px; z-index: 1000;'
+    ' max-width: min(36rem, 70vw); max-height: 45vh; overflow-y: auto;'
+    ' background: rgba(255,255,255,0.94); border-radius: 6px;'
+    ' box-shadow: 0 1px 4px rgba(0,0,0,0.3); padding: 8px 10px;'
+    ' font: 12px/1.35 -apple-system, "Segoe UI", Roboto, sans-serif; color: #222;}'
+    '#rs-legend .rs-legend-title {font-weight: 600; margin-bottom: 4px;}'
+    '#rs-legend .rs-legend-row {display: flex; align-items: center; gap: 8px; margin: 2px 0;}'
+    '#rs-legend .rs-legend-swatch {flex: none; width: 14px; height: 14px;'
+    ' border-radius: 50%; border: 1px solid rgba(0,0,0,0.35);}'
+)
+
+
+def _legend_entries(panel_or_map):
+    """
+    ``(label, css colour)`` for each legend button in a `_map_panel` panel.
+
+    Read back off the buttons rather than passed in separately, so the
+    exported legend is by construction the one the notebook shows. A bare
+    map, or a panel with no legend buttons, gives an empty list.
+    """
+    box = next((c for c in getattr(panel_or_map, 'children', ())
+                if 'rs-map-legend' in getattr(c, '_dom_classes', ())), None)
+    entries = []
+    for button in getattr(box, 'children', ()):
+        label = getattr(button, 'description', '')
+        if label:
+            entries.append((label, getattr(button.style, 'button_color', '') or ''))
+    return entries
+
+
+def _legend_html(entries, title):
+    """The exported page's legend card, or '' when there is nothing to show."""
+    import html
+
+    if not entries:
+        return ''
+    rows = ''.join(
+        '<div class="rs-legend-row">'
+        f'<span class="rs-legend-swatch" style="background:{html.escape(colour)}"></span>'
+        f'<span>{html.escape(label)}</span></div>'
+        for label, colour in entries)
+    return (f'<style>{LEGEND_CSS}</style><div id="rs-legend">'
+            f'<div class="rs-legend-title">{html.escape(title)}</div>{rows}</div>')
+
+
 def open_map_in_browser(panel_or_map, filename=None, title='Ratio study map',
                         open_browser=True):
     """
@@ -127,12 +232,14 @@ def open_map_in_browser(panel_or_map, filename=None, title='Ratio study map',
     window, and the file keeps working after the kernel stops.
 
     The written file is self-contained (the map data is inlined), so it can be
-    emailed or attached to a report.
+    emailed or attached to a report. Given a panel, the page also carries the
+    panel's legend, as a card over the bottom-left corner of the map.
 
     Parameters
     ----------
     panel_or_map : lonboard.Map or ipywidgets.VBox
-        A map, or the panel returned by :func:`ratio_map` / :func:`local_moran`.
+        A map, or the panel returned by :func:`ratio_map`, :func:`vem_map` or
+        :func:`local_moran`. A bare map is exported without a legend.
     filename : str or Path, optional
         Where to write. Defaults to a uniquely named file in the system
         temporary directory.
@@ -172,6 +279,12 @@ def open_map_in_browser(panel_or_map, filename=None, title='Ratio study map',
     path = Path(filename)
 
     m.to_html(path, title=title)
+    html = path.read_text(encoding='utf-8')
+    html = html.replace('</head>', f'<style>{TOOLTIP_CSS}</style></head>', 1)
+    legend = _legend_html(_legend_entries(panel_or_map), title)
+    if legend:
+        html = html.replace('</body>', f'{legend}</body>', 1)
+    path.write_text(html, encoding='utf-8')
     if open_browser:
         webbrowser.open(path.as_uri())
     return path
@@ -209,6 +322,9 @@ def _map_panel(m, legend_box, height, widgets, title='Ratio study map'):
     """
     m.height = height
     m.add_class('rs-map')
+    # Tagged so `open_map_in_browser` can find the legend and copy it into
+    # the exported page, which otherwise carries the map alone.
+    legend_box.add_class('rs-map-legend')
 
     status = widgets.HTML('')
 
@@ -228,7 +344,7 @@ def _map_panel(m, legend_box, height, widgets, title='Ratio study map'):
 
     def _open(_button):
         try:
-            path = open_map_in_browser(m, title=title)
+            path = open_map_in_browser(panel, title=title)
             status.value = (f'<span style="color:#3c763d">Opened in your browser — '
                             f'<code>{path}</code></span>')
         except Exception as ex:                      # pragma: no cover - env specific
@@ -249,7 +365,9 @@ def _map_panel(m, legend_box, height, widgets, title='Ratio study map'):
 
     controls = widgets.HBox([browser_button, taller, shorter])
 
-    panel = widgets.VBox([controls, m, legend_box, status])
+    # The style widget goes last so the other children keep their indices.
+    panel = widgets.VBox([controls, m, legend_box, status,
+                          widgets.HTML(f'<style>{TOOLTIP_CSS}</style>')])
     panel.add_class('rs-map-panel')
     return panel
 
@@ -395,6 +513,17 @@ _BAND_ORDER = (BAND_VERY_LOW, BAND_LOW, BAND_CENTRAL, BAND_HIGH,
 # thing worth looking at. White ("no ratio") sits back there for the same
 # reason: it carries no finding and would obscure one.
 BACKGROUND_BANDS = (BAND_CENTRAL, BAND_MISSING)
+
+# Each band's distance from the centre of the scale, for `_edge_radius`:
+# the far tails get the full `edge_dot_scale`, the drifting ring half of it.
+_BAND_EDGE_LEVEL = {
+    BAND_MISSING: 0.0,
+    BAND_VERY_LOW: 1.0,
+    BAND_LOW: 0.5,
+    BAND_CENTRAL: 0.0,
+    BAND_HIGH: 0.5,
+    BAND_VERY_HIGH: 1.0,
+}
 
 def _style_legend_button(button, rgb):
     """
@@ -831,8 +960,60 @@ def _colour_code(values, colour_code_by, column, iqr_bands, iqr_log_transform,
     return codes, _band_descriptions(colour_code_by, bands, column)
 
 
+def _round_for_display(gdf):
+    """Return a copy of `gdf` ready for the feature-properties pane.
+
+    Float columns become text: whole numbers print as integers and the rest
+    to two decimals. lonboard narrows float64 to float32 on the way to the
+    browser, so a rounded float still shows as ``0.9499999881``; text is the
+    only form that survives intact. The index is dropped, or pyarrow adds it
+    as an ``__index_level_0__`` property whenever the frame has been
+    filtered.
+    """
+    out = gdf.reset_index(drop=True)
+    for col in out.select_dtypes(include='floating').columns:
+        out[col] = [
+            None if pd.isna(v) else (f'{v:.0f}' if float(v).is_integer() else f'{v:.2f}')
+            for v in out[col]]
+    return out
+
+
+_POPUP_STATS = ('median', 'mean', 'min', 'max')
+
+
+def _popup_labels(column, collapsed):
+    """Display names for the summary-statistic popup columns.
+
+    ``'median'`` reads ``'median of asr'``. When `collapsed` -- no grouping, or
+    one record per group -- the statistic of a single record is the record
+    itself, so every statistic is shown as plain `column` instead.
+    """
+    return {stat: column if collapsed else f'{stat} of {column}'
+            for stat in _POPUP_STATS}
+
+
+def _select_popup_cols(gdf, popup_cols, labels=None):
+    """Return `gdf` cut to `popup_cols` plus geometry; all columns if None.
+
+    `labels` renames columns for display (see `_popup_labels`). If renaming
+    makes two columns share a name, only the first is kept.
+    """
+    if popup_cols is not None:
+        cols = list(dict.fromkeys(popup_cols))
+        missing = [c for c in cols if c not in gdf.columns]
+        if missing:
+            raise ValueError(f'popup_cols not found: {missing}; '
+                             f'available: {[c for c in gdf.columns if c != "geometry"]}')
+        gdf = gdf[[c for c in cols if c != 'geometry'] + ['geometry']]
+    if labels:
+        gdf = gdf.rename(columns=labels)
+        gdf = gdf.loc[:, ~gdf.columns.duplicated()]
+    return gdf
+
+
 def _layered_scatter(gdf, categories, background, cmap, dot_size, opacity,
-                     lonboard, lonboard_cmap):
+                     lonboard, lonboard_cmap, popup_cols=None, radii=None,
+                     popup_labels=None):
     """
     Split the points into a background and a foreground scatter layer.
 
@@ -864,6 +1045,13 @@ def _layered_scatter(gdf, categories, background, cmap, dot_size, opacity,
     lonboard, lonboard_cmap : module
         Resolved optional dependencies, passed in so this helper does not
         repeat the lookup.
+    popup_cols : list of str, optional
+        Columns of `gdf` to keep in the properties pane; all if None.
+    radii : array-like of float, optional
+        Per-row radius multiple (see `_edge_radius`), same length as `gdf`.
+        None draws every dot at radius 1.
+    popup_labels : dict, optional
+        Column -> display name for the properties pane.
 
     Returns
     -------
@@ -871,7 +1059,10 @@ def _layered_scatter(gdf, categories, background, cmap, dot_size, opacity,
         Background layer first, foreground second; either may be absent.
     """
     categories = np.asarray(categories)
+    gdf = _select_popup_cols(gdf, popup_cols, popup_labels)
     background = np.asarray(background, dtype=bool)
+    if radii is not None:
+        radii = np.asarray(radii, dtype=np.float32)
 
     layers = []
     for mask in (background, ~background):
@@ -880,10 +1071,11 @@ def _layered_scatter(gdf, categories, background, cmap, dot_size, opacity,
         subset = gdf[mask]
         fill_color = lonboard_cmap.apply_categorical_cmap(
             pd.Series(categories[mask], index=subset.index), cmap=cmap)
+        extra = {} if radii is None else {'get_radius': radii[mask]}
         layers.append(lonboard.ScatterplotLayer.from_geopandas(
-            subset, pickable=True, radius_scale=dot_size, opacity=opacity,
+            _round_for_display(subset), pickable=True, radius_scale=dot_size, opacity=opacity,
             auto_highlight=True, get_fill_color=fill_color,
-            get_line_color='black', line_width_min_pixels=1, stroked=False,
+            get_line_color='black', line_width_min_pixels=1, stroked=False, **extra,
         ))
     return layers
 
@@ -926,12 +1118,14 @@ def ratio_map(df=None, column=None, groupby=None, n_bins=5,
               height=DEFAULT_MAP_HEIGHT, *,
               dot_size=DEFAULT_DOT_SIZE,
               opacity=DEFAULT_DOT_OPACITY,
+              edge_dot_scale=DEFAULT_EDGE_DOT_SCALE,
               colour_code_by='iqr',
               iqr_bands=DEFAULT_IQR_BANDS,
               iqr_log_transform=True,
               iqr_min_cod=0,
               mad_bands=DEFAULT_MAD_BANDS,
-              standard_bands=DEFAULT_STANDARD_BANDS):
+              standard_bands=DEFAULT_STANDARD_BANDS,
+              popup_cols=None):
     """
     Display ratios on an interactive map, coloured by how each point's ASR
     compares to the sample's median ASR.
@@ -991,6 +1185,12 @@ def ratio_map(df=None, column=None, groupby=None, n_bins=5,
         hundred sales is visibly darker than a patch of five, and the
         basemap stays legible underneath. Pass ``1`` for the solid dots the
         maps drew before this was an argument.
+    edge_dot_scale : float, default ``DEFAULT_EDGE_DOT_SCALE`` (2.0)
+        Radius multiple for dots in the outermost colour classes (red / dark
+        blue; the fixed tails under ``'quantile'``). The drifting ring is
+        drawn halfway between, and the central band at `dot_size` itself, so
+        the outliers stand out by size as well as colour. ``1`` draws every
+        dot the same size.
     colour_code_by : {'iqr', 'mad', 'standard', 'quantile'}, default 'iqr'
         How the five colours are assigned.
 
@@ -1026,6 +1226,14 @@ def ratio_map(df=None, column=None, groupby=None, n_bins=5,
         than `iqr_bands` because the MAD is a much smaller unit than the
         IQR: on a roughly normal sample the IQR is about 2.7 MADs, so 1.5
         MADs would band a fifth of an ordinary roll as drifting.
+    popup_cols : list of str, optional
+        Columns to show in the feature-properties pane. Choose from the group
+        label, ``median``, ``mean``, ``min``, ``max``, ``sale_count`` and
+        ``colour_band`` (``category`` for ``colour_code_by='quantile'``); with
+        no ``groupby`` any column of ``df`` works too. Default: all of them.
+        The statistics display as ``'median of <column>'`` etc.; with no
+        ``groupby``, or a ``groupby`` unique per record, they all display as
+        plain ``<column>``, since the statistic of one record is itself.
     standard_bands : tuple of float, default ``DEFAULT_STANDARD_BANDS`` (0.10, 0.25)
         ``(inner, outer)`` proportions of the median for
         ``colour_code_by='standard'`` -- so by default grey within 10 % of
@@ -1062,6 +1270,7 @@ def ratio_map(df=None, column=None, groupby=None, n_bins=5,
                 f'colour_code_by={colour_code_by!r} is not one of '
                 f'{COLOUR_CODE_SCHEMES}.')
         opacity = _as_opacity(opacity)
+        _edge_radius([], edge_dot_scale)            # validate before the heavy lifting
         if column not in df.columns or (groupby is not None and groupby not in df.columns):
             print('Please enter valid column name')
             return
@@ -1095,12 +1304,20 @@ def ratio_map(df=None, column=None, groupby=None, n_bins=5,
             for stat in ('median', 'mean', 'min', 'max'):
                 points[stat] = gdf[column].to_numpy()
             points['sale_count'] = 1
+            for extra in (popup_cols or []):
+                if extra in gdf.columns and extra not in points.columns:
+                    points[extra] = gdf[extra].to_numpy()
             points_gdf = gpd.GeoDataFrame(points, crs='EPSG:4326', geometry=gdf.geometry.to_numpy())
+
+        # A statistic of one record is the record, so with no grouping (or a
+        # group column that is unique per row) the popup shows the bare column.
+        popup_labels = _popup_labels(column, bool((points_gdf['sale_count'] == 1).all()))
 
         if colour_code_by == 'quantile':
             layers, legend_items = _quantile_layers(
                 points_gdf, column, n_bins, dot_size, opacity, widgets,
-                lonboard, lonboard_cmap)
+                lonboard, lonboard_cmap, popup_cols=popup_cols,
+                edge_dot_scale=edge_dot_scale, popup_labels=popup_labels)
         else:
             values = points_gdf['median'].to_numpy(dtype=float)
             codes, descriptions = _colour_code(
@@ -1117,7 +1334,10 @@ def ratio_map(df=None, column=None, groupby=None, n_bins=5,
                                        for code in codes]
             layers = _layered_scatter(
                 band_gdf, codes, np.isin(codes, BACKGROUND_BANDS),
-                BAND_COLOURS, dot_size, opacity, lonboard, lonboard_cmap)
+                BAND_COLOURS, dot_size, opacity, lonboard, lonboard_cmap,
+                popup_cols=popup_cols, popup_labels=popup_labels,
+                radii=_edge_radius([_BAND_EDGE_LEVEL[c] for c in codes],
+                                   edge_dot_scale))
             legend_items = _band_legend(codes, values, column, descriptions,
                                         widgets)
 
@@ -1134,7 +1354,8 @@ def ratio_map(df=None, column=None, groupby=None, n_bins=5,
 
 
 def _quantile_layers(points_gdf, column, n_bins, dot_size, opacity, widgets,
-                     lonboard, lonboard_cmap):
+                     lonboard, lonboard_cmap, popup_cols=None,
+                     edge_dot_scale=DEFAULT_EDGE_DOT_SCALE, popup_labels=None):
     """
     Layers and legend for the legacy ``colour_code_by='quantile'`` scheme.
 
@@ -1159,6 +1380,10 @@ def _quantile_layers(points_gdf, column, n_bins, dot_size, opacity, widgets,
     widgets, lonboard, lonboard_cmap : module
         Resolved optional dependencies, passed in so this helper does not
         repeat the lookup.
+    edge_dot_scale : float
+        Radius multiple for the two fixed tails. The graded bins grow toward
+        half of it at their own outer ends, so a graded dot never matches a
+        tail dot in size.
 
     Returns
     -------
@@ -1236,6 +1461,12 @@ def _quantile_layers(points_gdf, column, n_bins, dot_size, opacity, widgets,
         button.style.text_color = 'rgb(255,255,255)'
         legend_items.append(button)
 
+    # Edge level: 1 for the tails; for graded bin i (1-based) its distance
+    # from the middle bin, as `_graded_colors` measures it, halved.
+    half = (actual_bins - 1) / 2.0
+    level = np.where(np.isin(categories, (0, high_code)), 1.0,
+                     0.5 * np.abs(categories - 1 - half) / half if half > 0 else 0.0)
+
     scatter_gdf = points_gdf.copy()
     scatter_gdf['category'] = categories
     # The graded middle goes underneath and the two fixed tails on top. This
@@ -1246,7 +1477,9 @@ def _quantile_layers(points_gdf, column, n_bins, dot_size, opacity, widgets,
     layers = _layered_scatter(
         scatter_gdf, categories,
         ~np.isin(categories, (0, high_code)),
-        color_dict, dot_size, opacity, lonboard, lonboard_cmap)
+        color_dict, dot_size, opacity, lonboard, lonboard_cmap,
+        popup_cols=popup_cols, radii=_edge_radius(level, edge_dot_scale),
+        popup_labels=popup_labels)
     return layers, legend_items
 
 
@@ -1255,7 +1488,8 @@ def vem_map(df=None, assessment_header=None, market_value_header=None,
             quantiles=None, window_size=None, conf_level=0.9, ci_method='binom',
             acceptable_inequity_level=0.1, strict=False,
             height=DEFAULT_MAP_HEIGHT, dot_size=DEFAULT_DOT_SIZE,
-            opacity=DEFAULT_DOT_OPACITY):
+            opacity=DEFAULT_DOT_OPACITY, popup_cols=None,
+            edge_dot_scale=DEFAULT_EDGE_DOT_SCALE):
     """
     Map each sale by whether its local (moving) median ASR is inside the band.
 
@@ -1299,6 +1533,14 @@ def vem_map(df=None, assessment_header=None, market_value_header=None,
         ``radius_scale`` for the dots. See :func:`ratio_map`.
     opacity : float, default ``DEFAULT_DOT_OPACITY`` (0.4)
         Fill opacity of the dots, 0 to 1. See :func:`ratio_map`.
+    popup_cols : list of str, optional
+        Columns of ``df`` to show in the feature-properties pane, ahead of
+        the computed ``local_median``, ``vem_verdict`` and ``vem_flag``.
+        Default: ``market_value_header``, ``assessment_header`` and the ratio
+        column.
+    edge_dot_scale : float, default ``DEFAULT_EDGE_DOT_SCALE`` (2.0)
+        Radius multiple for the red and blue (out-of-band) dots; green dots
+        are drawn at `dot_size`. ``1`` draws every dot the same size.
 
     Returns
     -------
@@ -1353,8 +1595,16 @@ def vem_map(df=None, assessment_header=None, market_value_header=None,
         work['vem_verdict'] = work['vem_flag'].map(
             {-1: 'below the band', 0: 'within the band', 1: 'above the band'})
 
-        keep = [c for c in (market_value_header, assessment_header, ratio_col,
-                            'local_median', 'vem_verdict', 'vem_flag') if c and c in work.columns]
+        computed = ('local_median', 'vem_verdict', 'vem_flag')
+        if popup_cols is None:
+            shown = [c for c in (market_value_header, assessment_header, ratio_col)
+                     if c and c in work.columns]
+        else:
+            shown = [c for c in dict.fromkeys(popup_cols) if c not in computed]
+            missing = [c for c in shown if c not in work.columns]
+            if missing:
+                raise ValueError(f'popup_cols not found in df: {missing}')
+        keep = shown + list(computed)
         gdf = gpd.GeoDataFrame(
             work[keep], crs='EPSG:4326',
             geometry=gpd.points_from_xy(x=work[long_col], y=work[lat_col], crs='EPSG:4326'),
@@ -1364,10 +1614,11 @@ def vem_map(df=None, assessment_header=None, market_value_header=None,
         fill_color = lonboard_cmap.apply_categorical_cmap(gdf['vem_flag'], cmap=colours)
 
         layer = lonboard.ScatterplotLayer.from_geopandas(
-            gdf, pickable=True, radius_scale=dot_size,
+            _round_for_display(gdf), pickable=True, radius_scale=dot_size,
             opacity=_as_opacity(opacity), auto_highlight=True,
             get_fill_color=fill_color, get_line_color='black',
             line_width_min_pixels=1, stroked=False,
+            get_radius=_edge_radius(gdf['vem_flag'].abs(), edge_dot_scale),
         )
         m = lonboard.Map([layer])
         m.basemap_style = 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json'
@@ -1500,7 +1751,8 @@ def global_moran(df=None, ratio=None, lat_col='latitude', long_col='longitude'):
 
 def local_moran(df=None, ratio=None, lat_col='latitude', long_col='longitude',
                 height=DEFAULT_MAP_HEIGHT, dot_size=DEFAULT_DOT_SIZE,
-                opacity=DEFAULT_DOT_OPACITY):
+                opacity=DEFAULT_DOT_OPACITY, popup_cols=None,
+                edge_dot_scale=DEFAULT_EDGE_DOT_SCALE):
     """
     Calculate the local Moran/Getis-Ord statistic and visually plot
     cold and hot spots for the sales file.
@@ -1509,11 +1761,13 @@ def local_moran(df=None, ratio=None, lat_col='latitude', long_col='longitude',
     ----------
     df : DataFrame
         Sales DataFrame to plot. Must contain ``ratio``, ``lat_col`` and
-        ``long_col``. Any of ``roll_num``, ``inst_num``, ``saledate``,
-        ``saletype``, ``sale_amt``, ``r_enbhd_condo`` or ``r_hnbhd_condo``
-        that are present are carried through to the map tooltip.
+        ``long_col``, plus every column named in ``popup_cols``.
     ratio : str
         Ratio to test for local spatial auto-correlation.
+    popup_cols : list of str, optional
+        Columns of ``df`` to show in the feature-properties pane, ahead of
+        the computed ``Z_Value``, ``P_Value``, ``category`` and ``flag``.
+        Default: just ``ratio``.
     lat_col, long_col : str, default 'latitude', 'longitude'
         Coordinate columns in ``df``.
     height : int or str, default ``DEFAULT_MAP_HEIGHT`` (700)
@@ -1523,6 +1777,10 @@ def local_moran(df=None, ratio=None, lat_col='latitude', long_col='longitude',
         ``radius_scale`` for the dots. See :func:`ratio_map`.
     opacity : float, default ``DEFAULT_DOT_OPACITY`` (0.4)
         Fill opacity of the dots, 0 to 1. See :func:`ratio_map`.
+    edge_dot_scale : float, default ``DEFAULT_EDGE_DOT_SCALE`` (2.0)
+        Radius multiple for the 99 % hot and cold spots. The 95 % and 90 %
+        classes step down linearly toward `dot_size`, which is where the
+        not-significant dots are drawn. ``1`` draws every dot the same size.
 
     Returns
     -------
@@ -1569,16 +1827,27 @@ def local_moran(df=None, ratio=None, lat_col='latitude', long_col='longitude',
             cat_color_map = {code: rgb for code, (_, rgb) in MORAN_CLASSES.items()}
             fill_color = lonboard_cmap.apply_categorical_cmap(gdf['category'], cmap=cat_color_map)
 
-            keep_cols = [c for c in ['roll_num', 'inst_num', 'saledate', 'saletype', 'sale_amt',
-                                      'r_enbhd_condo', 'r_hnbhd_condo'] if c in gdf.columns]
+            keep_cols = [ratio] if popup_cols is None else list(popup_cols)
+            missing = [c for c in keep_cols if c not in gdf.columns]
+            if missing:
+                raise ValueError(f'popup_cols not found in df: {missing}')
+            keep_cols = [c for c in dict.fromkeys(keep_cols)
+                         if c not in ('Z_Value', 'P_Value', 'category', 'flag', 'geometry')]
             gdf = gdf[keep_cols + ['Z_Value', 'P_Value', 'category', 'flag', 'geometry']]
 
             # No `get_line_color` / `line_width_min_pixels`: `stroked=False`
             # means no outline is drawn, so both were inert.
+            # Codes 1..7 run coldest to hottest around not-significant (4),
+            # so |code - 4| / 3 is 1 at the 99 % bands and 0 in the middle.
+            # The unclassified bucket (0) carries no finding: centre size.
+            codes = gdf['category'].to_numpy()
+            level = np.where(codes == MORAN_UNCLASSIFIED, 0.0,
+                             np.abs(codes - MORAN_NOT_SIGNIFICANT) / 3.0)
             layer = lonboard.ScatterplotLayer.from_geopandas(
-                gdf, pickable=True, radius_scale=dot_size,
+                _round_for_display(gdf), pickable=True, radius_scale=dot_size,
                 opacity=_as_opacity(opacity), auto_highlight=True,
                 get_fill_color=fill_color, stroked=False,
+                get_radius=_edge_radius(level, edge_dot_scale),
             )
 
             m = lonboard.Map([layer])
@@ -1602,8 +1871,7 @@ def local_moran(df=None, ratio=None, lat_col='latitude', long_col='longitude',
             return _map_panel(m, box, height, widgets,
                               title=f'Hot and cold spots - {ratio}')
         else:
-            print('Please pick valid column name. Columns roll_num, inst_num, saledate, saletype, sale_amt, '
-                  'r_enbhd_condo, r_hnbhd_condo required in dataframe')
+            print(f'Please pick a valid column name: {ratio!r} is not a column of the dataframe.')
             return None
     except Exception as ex:
         raise ex

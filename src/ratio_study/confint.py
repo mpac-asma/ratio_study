@@ -23,13 +23,48 @@ CI_SUPPORTED_INDICATORS = (
     'CoC_10', 'CoC_15', 'CoC_20', 'MAE', 'MAPE', 'MdAPE', 'CoV',
     'Gini_Sale_Prices', 'Gini_Assessments', 'Concentration_Index',
     'Redistributive_Effect', 'Total_ASR', 'MKI', 'RRI',
-    'Modified_Kakwani_Index', 'Reranking_Index',
+    'Modified_Kakwani_Index', 'Reranking_Index', 'VEI', 'VEM',
 )
+
+# Result columns each bootstrapped indicator produces, where they differ from
+# the indicator's own name. `rts_calculator` reports MKI and RRI under their
+# long names (renamed only when the table is formatted), and VEM has no single
+# value of its own: its two numeric outputs, severity and prevalence, each get
+# an interval. Anything not listed here is its own result column.
+BOOTSTRAP_CI_RESULT_COLUMNS = {
+    'MKI': ('Modified_Kakwani_Index',),
+    'RRI': ('Reranking_Index',),
+    'VEM': ('Inequity_severity', 'Inequity_prevalence'),
+}
+
+
+def bootstrap_ci_result_columns(indicators):
+    """
+    Map requested bootstrap-CI indicators to the result columns that carry
+    their intervals, in order and without duplicates.
+
+    Parameters
+    ----------
+    indicators : iterable of str
+        Indicator names as the caller spells them, e.g. ``['MKI', 'VEM']``.
+
+    Returns
+    -------
+    list of str
+        Result column names, e.g. ``['Modified_Kakwani_Index',
+        'Inequity_severity', 'Inequity_prevalence']``.
+    """
+    columns = []
+    for name in indicators:
+        for col in BOOTSTRAP_CI_RESULT_COLUMNS.get(name, (name,)):
+            if col not in columns:
+                columns.append(col)
+    return columns
 
 # ``ci_mode='distribution'`` builds every interval from a closed-form
 # sampling distribution instead of by resampling. `Median`, `Mean`,
 # `Weighted_Mean` and `CoD` each have a formula of their own, prescribed by
-# the IAAO Exposure Draft (May 2026) Appendix D. `PRB` and `PRD` are not in
+# the IAAO Standard on Ratio Studies (October 2026) Appendix D. `PRB` and `PRD` are not in
 # Appendix D, but neither needs the bootstrap to get an interval: `PRB`
 # keeps the interval its own slope regression always produces (see `prb`
 # in `indicators.py`), and `PRD` -- the ratio of `Mean` to `Weighted_Mean`
@@ -40,6 +75,12 @@ CI_SUPPORTED_INDICATORS = (
 DISTRIBUTION_CI_SUPPORTED_INDICATORS = (
     'Median', 'Mean', 'Weighted_Mean', 'CoD', 'PRB', 'PRD',
 )
+
+# Every name an interval can be asked for in either mode. A `ci_indicators`
+# entry from this set that the study does not compute is added to the study;
+# anything else is not an indicator and is only reported.
+_CI_KNOWN_INDICATORS = frozenset(CI_SUPPORTED_INDICATORS) | frozenset(
+    DISTRIBUTION_CI_SUPPORTED_INDICATORS)
 
 # Distribution-mode counterpart of `CI_DEFAULT_INDICATORS`. All six are on
 # by default because none of them costs more than a pass over the ratios.
@@ -66,12 +107,12 @@ _CI_MODES = {
 }
 
 # Sample size at or below which the median confidence interval switches from
-# the large-sample rank formula (Exposure Draft Appendix D.2) to the exact
+# the large-sample rank formula (IAAO Standard Appendix D.2) to the exact
 # binomial tables (Appendix D.4).
 MEDIAN_CI_SMALL_SAMPLE_MAX = 30
 
 # Binomial ("Clapp 1989") interpolation parameters for the small-sample
-# median confidence interval, Exposure Draft Tables D.4.1 (90 %) and D.4.2
+# median confidence interval, IAAO Standard Tables D.4.1 (90 %) and D.4.2
 # (95 %). Keyed by sample size; each value is ``(weight, rank_a, rank_b)``
 # and means ``weight * R[rank_a] + (1 - weight) * R[rank_b]`` for the lower
 # bound, with ``R`` the ratios in ascending order and the ranks 1-indexed.
@@ -398,7 +439,7 @@ def normalize_ci_args(bootstrap_args=None
         the bootstrap uses it; the distribution formulas are exact.
     ci_mode : {'bootstrap', 'distribution'}, optional
         Which family of interval to build. ``'distribution'`` (the default)
-        uses the closed-form formulas of the IAAO Exposure Draft (May 2026)
+        uses the closed-form formulas of the IAAO Standard on Ratio Studies (October 2026)
         Appendix D; ``'bootstrap'`` resamples. The mode decides
         which indicators can carry an interval at all --
         `CI_SUPPORTED_INDICATORS` for the bootstrap,
@@ -409,12 +450,11 @@ def normalize_ci_args(bootstrap_args=None
         Indicators the study itself computes. The CI indicator list is
         intersected with these, since a ``<name>_ci`` column with no
         ``<name>`` column beside it would be unreadable. When the caller
-        names the CI indicators themselves and the mode is
-        ``'distribution'``, the study takes on the missing indicator
-        instead of losing the interval -- each closed form is one pass
-        over the ratios -- and the names to add come back as
-        ``'ci_study_indicator_additions'``. Otherwise the interval is
-        dropped, with a message when it was explicitly requested.
+        names the CI indicators themselves, in either mode, the study
+        takes on any missing indicator instead of losing the interval,
+        and the names to add come back as
+        ``'ci_study_indicator_additions'``. A default CI list is only
+        intersected, so it never widens the study.
     has_groups : bool, default False
         Whether the study has a `group_by`. Per-group CIs are switched
         off when it does not.
@@ -597,6 +637,24 @@ def normalize_ci_args(bootstrap_args=None
     else:
         requested = list(requested)
 
+    # Indicators the study has to start computing because the caller named
+    # them in `ci_indicators` without listing them in `indicators`. Output
+    # only -- the caller never sets this key; `ratios` / `ratios_report` read
+    # it back out and extend their `indicators` with it. Asking for an
+    # interval by name is asking for the indicator too, so it is added
+    # rather than dropped -- in either mode, and even when this mode has no
+    # interval for it (the indicator is still computed, and the message
+    # below says why it has no interval). A default CI list is still only
+    # intersected with the study, so a narrow `indicators` keeps the table
+    # narrow, and names that are not indicators at all are never added.
+    additions = []
+    cis_on = bool(resolved['bootstrap_cis_for_population']
+                  or resolved['bootstrap_cis_for_groups'])
+    if study and indicators_were_set and cis_on:
+        additions = list(dict.fromkeys(
+            x for x in requested if x not in study and x in _CI_KNOWN_INDICATORS))
+        study = study + additions
+
     unsupported = [x for x in requested if x not in supported]
     if unsupported and indicators_were_set:
         family = ('distribution-based' if distribution_mode else 'bootstrap')
@@ -605,32 +663,7 @@ def normalize_ci_args(bootstrap_args=None
             f'{unsupported}; they were dropped. Available: {list(supported)}.'
         )
     requested = [x for x in requested if x in supported]
-
-    # Indicators the study has to start computing for the requested intervals
-    # to have a point estimate to sit beside. Output only -- the caller never
-    # sets this key; `ratios` / `ratios_report` read it back out.
-    additions = []
-    cis_on = bool(resolved['bootstrap_cis_for_population']
-                  or resolved['bootstrap_cis_for_groups'])
     if study:
-        missing = [x for x in requested if x not in study]
-        if missing and distribution_mode and cis_on and indicators_were_set:
-            # The caller asked for these intervals by name, and every
-            # distribution-mode estimator is one pass over the ratios, so the
-            # study takes the indicator on rather than dropping the interval
-            # the caller asked for. Two limits keep this from widening a study
-            # nobody widened: the bootstrap still drops (a resampled interval
-            # on an indicator nobody asked for is real work), and a default CI
-            # indicator list is still intersected, so choosing a narrow
-            # `indicators` list keeps the results table narrow.
-            additions = list(dict.fromkeys(missing))
-            study = study + additions
-        elif missing and indicators_were_set:
-            messages.append(
-                f'input error: confidence intervals were requested for {missing}, '
-                'which the study does not compute; add them to `indicators` to see '
-                'those intervals.'
-            )
         requested = [x for x in requested if x in study]
 
     resolved['bootstrap_indicators'] = list(dict.fromkeys(requested))
@@ -1200,8 +1233,8 @@ def compute_median_ci(asr, conf_level=0.9, method='binom'):
     differ only in how that distance is turned into a value:
 
     1. **Hyndman-Fan percentile rank** (``method='R6'`` or
-       ``method='R7'``) -- the form prescribed by the IAAO Exposure Draft
-       (May 2026) Section E, Appendix D.2, and Gloudemans & Almy (2011)
+       ``method='R7'``) -- the form prescribed by the IAAO Standard on Ratio Studies
+       (October 2026) Appendix D.2, and Gloudemans & Almy (2011)
        p. 365. The interval is read off as the percentile ranks
        ``p = 0.5 -/+ z / (2 * sqrt(n))`` of the data, with ``p`` mapped to
        a position by ``h = p * (n + 1)`` (R6) or ``h = p * (n - 1) + 1``
@@ -1229,7 +1262,7 @@ def compute_median_ci(asr, conf_level=0.9, method='binom'):
     method : {'binom', 'R6', 'R7'}, default 'binom'
         CI family, as described above. ``'binom'`` is the default and is
         what ``vem`` and the other internal callers use; ``'R6'`` /
-        ``'R7'`` follow the draft's percentile-rank presentation and are
+        ``'R7'`` follow the Standard's percentile-rank presentation and are
         what ``vei_analysis`` uses, matching its ``percentile_method``.
 
     Returns
@@ -1372,10 +1405,188 @@ def compute_median_ci(asr, conf_level=0.9, method='binom'):
     raise ValueError(f"Unknown compute_median_ci method: {method!r}; expected 'R6', 'R7', or 'binom'.")
 
 
+@lru_cache(maxsize=4096)
+def _median_ci_positions(n, conf_level, method):
+    """
+    The order statistics `compute_median_ci` reads for a sample of size `n`.
+
+    Every method reads its median and bounds off fixed positions in the
+    sorted sample, and those positions depend only on `n`, the level and
+    the method -- never on the values. This returns them so a caller with
+    many samples of the same size can read all of them at once.
+
+    Parameters
+    ----------
+    n : int
+        Sample size, at least 2.
+    conf_level : float
+        Confidence level, as accepted by `compute_median_ci`.
+    method : {'binom', 'R6', 'R7'}
+        CI family.
+
+    Returns
+    -------
+    dict
+        * 'median' : tuple of 0-indexed positions, averaged.
+        * 'lower', 'upper' : ``(i, j, fraction)`` -- the bound is
+          ``x[i] + fraction * (x[j] - x[i])``, which reduces to ``x[i]``
+          when ``fraction`` is 0 (always, for 'binom').
+    """
+    conf_level = confidence_level_as_fraction(conf_level, 'conf_level')
+    alpha = 1 - conf_level
+    mid = n // 2
+    median = (mid,) if n % 2 else (mid - 1, mid)
+    method_up = str(method).upper()
+
+    if method_up == 'BINOM':
+        lower_idx, upper_idx, _ = _binom_median_rank_bounds(n, alpha)
+        return {'median': median, 'lower': (lower_idx, lower_idx, 0.0),
+                'upper': (upper_idx, upper_idx, 0.0)}
+
+    if method_up in ('R6', 'R7'):
+        # The same arithmetic as `compute_median_ci`, then the position-to-
+        # index step of `_order_statistic_at`, so the two cannot disagree.
+        z = norm.ppf(1.0 - alpha / 2.0)
+        spread = z / (2.0 * math.sqrt(n))
+        p_lo = min(max(0.5 - spread, 0.0), 1.0)
+        p_hi = min(max(0.5 + spread, 0.0), 1.0)
+        if method_up == 'R6':
+            h_lo, h_hi = p_lo * (n + 1), p_hi * (n + 1)
+        else:
+            h_lo, h_hi = p_lo * (n - 1) + 1, p_hi * (n - 1) + 1
+
+        def _bracket(position):
+            position = min(max(float(position), 1.0), float(n))
+            lower_index = int(math.floor(position))
+            if lower_index >= n:
+                return (n - 1, n - 1, 0.0)
+            return (lower_index - 1, lower_index, position - lower_index)
+
+        return {'median': median, 'lower': _bracket(h_lo), 'upper': _bracket(h_hi)}
+
+    raise ValueError(f"Unknown compute_median_ci method: {method!r}; expected 'R6', 'R7', or 'binom'.")
+
+
+def moving_median_ci(values, half_width, conf_level=0.9, method='binom'):
+    """
+    `compute_median_ci` over a centred moving window, for every position.
+
+    Row ``i`` uses ``values[max(0, i - half_width) : i + half_width + 1]``,
+    and the result is identical to calling `compute_median_ci` on each of
+    those windows in turn -- which is what `vem` used to do, once per sale,
+    and what made it the slowest indicator to bootstrap.
+
+    The speed-up rests on one fact: every full-width window has the same
+    length, so `compute_median_ci` reads the same order-statistic positions
+    from each (see `_median_ci_positions`). Those few positions are pulled
+    out of all the full windows at once with a sliding sorted window
+    (pandas' rolling quantile, O(log width) per step), and combined with
+    the same arithmetic. Only the
+    ``2 * half_width`` shorter windows at the two ends, whose lengths
+    differ, are read one by one, from a sorted copy that gains one value
+    per row rather than being re-sorted.
+
+    Parameters
+    ----------
+    values : array-like
+        Values in window order (for `vem`, ASRs sorted by value proxy).
+        Must not contain NaN.
+    half_width : int
+        Rows either side of the centre; full windows hold
+        ``2 * half_width + 1`` values.
+    conf_level : float, default 0.9
+        Confidence level, as accepted by `compute_median_ci`.
+    method : {'binom', 'R6', 'R7'}, default 'binom'
+        CI family, as in `compute_median_ci`.
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        ``(medians, lowers, uppers)``, one entry per row of `values`.
+    """
+    values = np.asarray(values, dtype=float)
+    total = len(values)
+    medians = np.empty(total)
+    lowers = np.empty(total)
+    uppers = np.empty(total)
+    if total == 0:
+        return medians, lowers, uppers
+
+    hw = max(int(half_width), 0)
+    width = 2 * hw + 1
+    # Rows whose window is cut short by an end of the sample.
+    first_full, last_full = hw, total - hw - 1
+    if width < 2 or last_full < first_full:
+        edge_rows = range(total)
+    else:
+        edge_rows = list(range(0, first_full)) + list(range(last_full + 1, total))
+
+    if width < 2 or last_full < first_full:
+        # No full window (or a window of one): nothing to share, so read
+        # each window directly.
+        for i in edge_rows:
+            ci = compute_median_ci(values[max(0, i - hw):i + hw + 1], conf_level, method=method)
+            medians[i], lowers[i], uppers[i] = ci['median'], ci['lower'], ci['upper']
+        return medians, lowers, uppers
+
+    def _read(sorted_window, row):
+        plan = _median_ci_positions(len(sorted_window), conf_level, method)
+        m = plan['median']
+        medians[row] = (float(sorted_window[m[0]]) if len(m) == 1 else
+                        (sorted_window[m[0]] + sorted_window[m[1]]) / 2.0)
+        for out, (i, j, fraction) in ((lowers, plan['lower']), (uppers, plan['upper'])):
+            low = float(sorted_window[i])
+            out[row] = low + fraction * (float(sorted_window[j]) - low)
+
+    # The short windows at the ends are prefixes (left) and suffixes
+    # (right) of the sample that grow by one value per row, so one sorted
+    # copy is kept and each new value inserted into it, rather than every
+    # window being sorted from scratch.
+    window = np.sort(values[:hw + 1])
+    for row in range(first_full):
+        _read(window, row)
+        incoming = values[row + hw + 1]
+        window = np.insert(window, np.searchsorted(window, incoming), incoming)
+    window = np.sort(values[total - hw - 1:])
+    for row in range(total - 1, last_full, -1):
+        _read(window, row)
+        incoming = values[row - hw - 1]
+        window = np.insert(window, np.searchsorted(window, incoming), incoming)
+
+    plan = _median_ci_positions(width, conf_level, method)
+    kth = sorted({*plan['median'], *plan['lower'][:2], *plan['upper'][:2]})
+    # The k-th smallest value of every full window, for each position the
+    # plan needs. pandas' rolling quantile keeps a sorted skiplist as the
+    # window slides -- O(log width) a step instead of re-sorting -- and with
+    # 'lower' interpolation returns an element of the window, not an
+    # interpolated value. It truncates ``q * (width - 1)`` to pick the
+    # element, so q is aimed at the middle of the k-th slot (k + 0.5) where
+    # floating-point error cannot tip it into a neighbour.
+    rolling = pd.Series(values).rolling(width)
+    order_stat = {}
+    for k in kth:
+        q = 1.0 if k >= width - 1 else (k + 0.5) / (width - 1)
+        order_stat[k] = rolling.quantile(q, interpolation='lower').to_numpy()[width - 1:]
+
+    rows = slice(first_full, last_full + 1)
+    if len(plan['median']) == 1:
+        medians[rows] = order_stat[plan['median'][0]]
+    else:
+        medians[rows] = (order_stat[plan['median'][0]] + order_stat[plan['median'][1]]) / 2.0
+    for out, (i, j, fraction) in ((lowers, plan['lower']), (uppers, plan['upper'])):
+        low = order_stat[i]
+        out[rows] = low + fraction * (order_stat[j] - low) if fraction else low
+    # `compute_median_ci` swaps an inverted R6/R7 pair; the positions here
+    # are always ordered, but keep the guarantee explicit.
+    swap = lowers > uppers
+    lowers[swap], uppers[swap] = uppers[swap], lowers[swap]
+    return medians, lowers, uppers
+
+
 # ---------------------------------------------------------------------------------------------------------------------
 #  Distribution-based confidence intervals
 #
-#  IAAO Exposure Draft (May 2026) Appendix D. Each indicator gets the
+#  IAAO Standard on Ratio Studies (October 2026) Appendix D. Each indicator gets the
 #  formula prescribed for it rather than one generic interval:
 #
 #    D.1  mean            -- Student's t about the mean ratio
@@ -1445,7 +1656,7 @@ def _critical_value(conf_level, n=None, use_t=True):
         degrees of freedom.
     use_t : bool, default True
         If True, return Student's t; if False, the normal deviate.
-        Exposure Draft D.5.1 tabulates t and notes that 1.96 (95 %) and
+        IAAO Standard D.5.1 tabulates t and notes that 1.96 (95 %) and
         1.645 (90 %) may be used once the sample passes about 30. Using
         the exact t throughout reproduces those values to three decimals
         in the large-sample limit, so this never disagrees with the table
@@ -1473,7 +1684,7 @@ def _critical_value(conf_level, n=None, use_t=True):
 
 def mean_ci(asr, conf_level=0.95, weights=None):
     """
-    Confidence interval for the mean ratio (Exposure Draft D.1).
+    Confidence interval for the mean ratio (IAAO Standard D.1).
 
     ``xbar +/- t(alpha/2, n-1) * s / sqrt(n)``: the sample standard
     deviation over the root of the sample size, scaled by the two-tailed
@@ -1549,8 +1760,8 @@ def mean_ci(asr, conf_level=0.95, weights=None):
 
 def median_ci_rank(asr, conf_level=0.95):
     """
-    Large-sample rank confidence interval for the median (Exposure
-    Draft D.2).
+    Large-sample rank confidence interval for the median (IAAO
+    Standard D.2).
 
     Counts ``j`` ranks out from the middle of the sorted ratios, where
     ``j = z * sqrt(n) / 2`` for an odd sample and ``j = z * sqrt(n) / 2 +
@@ -1566,7 +1777,7 @@ def median_ci_rank(asr, conf_level=0.95):
     conf_level : float, default 0.95
         Confidence level, as a fraction or a percentage. ``z`` is the
         normal deviate for it -- 1.960 at 95 %, 1.645 at 90 %, the values
-        the draft quotes.
+        the Standard quotes.
 
     Returns
     -------
@@ -1579,7 +1790,7 @@ def median_ci_rank(asr, conf_level=0.95):
     -----
     Rounding ``j`` up widens the interval, so the achieved coverage is at
     or above the nominal level -- the conservative direction, and the one
-    the draft prescribes ("if the result from step 2 is not an integer,
+    the Standard prescribes ("if the result from step 2 is not an integer,
     round up").
     """
     try:
@@ -1626,8 +1837,8 @@ def median_ci_rank(asr, conf_level=0.95):
 
 def median_ci_clapp(asr, conf_level=0.95):
     """
-    Small-sample binomial confidence interval for the median (Exposure
-    Draft D.4, Tables D.4.1 and D.4.2; Clapp 1989).
+    Small-sample binomial confidence interval for the median (IAAO
+    Standard D.4, Tables D.4.1 and D.4.2; Clapp 1989).
 
     Each bound is a weighted average of two adjacent order statistics,
     with the weights read from the published table for the sample size.
@@ -1655,7 +1866,7 @@ def median_ci_clapp(asr, conf_level=0.95):
 
     Examples
     --------
-    The worked example from Exposure Draft D.4 (n = 17, 95 %):
+    The worked example from IAAO Standard D.4 (n = 17, 95 %):
 
     >>> ratios = [0.629, 0.641, 0.658, 0.693, 0.695, 0.717, 0.787, 0.789,
     ...           0.820, 0.848, 0.880, 0.895, 0.933, 0.947, 1.028, 1.035,
@@ -1710,7 +1921,7 @@ def median_ci_clapp(asr, conf_level=0.95):
 def median_ci_distribution(asr, conf_level=0.95, messages=None):
     """
     Median confidence interval, picking the formula the sample size calls
-    for (Exposure Draft D.2 and D.4).
+    for (IAAO Standard D.2 and D.4).
 
     ``n <= 30`` uses the exact binomial tables of D.4; a larger sample
     uses the rank formula of D.2. A small sample at a confidence level
@@ -1776,7 +1987,7 @@ def median_ci_distribution(asr, conf_level=0.95, messages=None):
 
 def weighted_mean_ci(assessment, market_value, conf_level=0.95, weights=None):
     """
-    Confidence interval for the weighted mean ratio (Exposure Draft D.3;
+    Confidence interval for the weighted mean ratio (IAAO Standard D.3;
     Fundamentals of Mass Appraisal 2011, 367, Table 10.2).
 
     The weighted mean is the ratio of the two totals,
@@ -1787,7 +1998,7 @@ def weighted_mean_ci(assessment, market_value, conf_level=0.95, weights=None):
               / (Sbar * sqrt(n * (n - 1)))``
 
     and the interval is ``R +/- t(alpha/2, n-1) * SE(R)``. The numerator
-    is ``sqrt(sum((A - R*S)^2))`` written out in the sums the draft's
+    is ``sqrt(sum((A - R*S)^2))`` written out in the sums the Standard's
     steps 2, 10 and 11 accumulate.
 
     Parameters
@@ -1810,7 +2021,7 @@ def weighted_mean_ci(assessment, market_value, conf_level=0.95, weights=None):
 
     Notes
     -----
-    The draft renders step 11 as ``(Abar / Sbar^2)(sum(S^2))``. Read that
+    The Standard renders step 11 as ``(Abar / Sbar^2)(sum(S^2))``. Read that
     way, step 12 would not be the square root of ``sum((A - R*S)^2)`` that
     steps 10 and 12 imply, and the worked reference in Fundamentals of
     Mass Appraisal would not reproduce; the exponent belongs to the whole
@@ -1844,7 +2055,7 @@ def weighted_mean_ci(assessment, market_value, conf_level=0.95, weights=None):
         sum_s2 = float(np.sum(w * s * s))
         sum_as = float(np.sum(w * a * s))
 
-        # sum((A - R*S)^2), expanded so it reads as the draft's steps.
+        # sum((A - R*S)^2), expanded so it reads as the Standard's steps.
         residual_ss = sum_a2 - 2.0 * weighted_mean * sum_as \
             + weighted_mean ** 2 * sum_s2
         if residual_ss < 0:
@@ -1874,7 +2085,7 @@ def prd_ci(assessment, market_value, conf_level=0.95, weights=None):
     """
     Confidence interval for PRD, the price-related differential.
 
-    Not one of the Exposure Draft's Appendix D formulas -- PRD has none --
+    Not one of the IAAO Standard's Appendix D formulas -- PRD has none --
     so this is a delta-method (first-order Taylor) interval built from two
     formulas the module already has, since ``PRD = Mean / Weighted_Mean``
     (see `prd` in ``indicators.py``): `mean_ci`'s D.1 formula for the
@@ -1988,7 +2199,7 @@ def prd_ci(assessment, market_value, conf_level=0.95, weights=None):
 
 def cod_ci(asr, conf_level=0.95):
     """
-    Confidence interval for the Coefficient of Dispersion (Exposure Draft
+    Confidence interval for the Coefficient of Dispersion (IAAO Standard
     D.6; Bonett and Seier 2006).
 
     Measures the typical absolute distance from the median, stabilises it

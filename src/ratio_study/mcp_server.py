@@ -740,7 +740,7 @@ else:
             intervals; a list names the indicators to cover.
         ci_mode : {'bootstrap', 'distribution'}, default 'distribution'
             Which family of interval to build. 'distribution' uses the
-            closed-form formulas of IAAO Exposure Draft Appendix D for
+            closed-form formulas of IAAO Standard on Ratio Studies Appendix D for
             Median, Mean, Weighted_Mean and CoD, PRB's own slope-regression
             interval, and a delta-method interval for PRD (the ratio of
             Mean to Weighted_Mean); it has no minimum-count gate, so it
@@ -921,6 +921,7 @@ else:
         prb_mvp_col: Optional[str] = None,
         mvp_sale_price_share: float = 0.5,
         model_name: str = "model",
+        report_title: Optional[str] = None,
         group_by: Optional[Union[str, List[str]]] = None,
         indicators: Optional[List[str]] = None,
         base_date: str = "",
@@ -962,6 +963,8 @@ else:
             50/50 proxy; 0.3 gives a 30/70 one.
         model_name : str, default 'model'
             Name shown in the report title and used in the filename.
+        report_title : str, optional
+            Replaces the default PDF report title with this exact text.
         group_by : str or list of str, optional
             Stratification, e.g. "neighbourhood" or ["neighbourhood", "property_type"].
         indicators : list of str, optional
@@ -1019,6 +1022,7 @@ else:
                 indicators=indicators,
                 descriptive=descriptive,
                 model_name=model_name,
+                report_title=report_title,
                 base_date=base_date,
                 export_directory=str(out_dir),
                 export_ratios=export_ratios,

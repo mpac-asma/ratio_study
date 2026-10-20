@@ -443,9 +443,9 @@ vertical_equity_panel(df, assessment_header=None, market_value_header=None,
                       assessment_standards=None, req_significance=0.05,
                       vei_conf_level=0.9, vei_acceptable_range=10,
                       vei_percentile_method='R7', vei_use_log_normal_delta=True,
-                      vem_acceptable_inequity_level=0.1, vem_use_mvp=False,
+                      vem_acceptable_inequity_level=0.1, vem_use_mvp=True,
                       vem_window_size=None, vem_conf_level=0.9, vem_zoom_y=True,
-                      vem_smart_zoom=True, vem_asr_col='asr', include_vem=True,
+                      vem_smart_zoom=True, vem_asr_col='asr', include_vem=False,
                       gauge_outer_multiple=3.0, x_scale='log',
                       title='Vertical Equity Panel', subtitle='', figsize=(8.5, 11.0),
                       return_object=False, graph_filepath='', show=None)
@@ -574,7 +574,7 @@ vei_use_log_normal_delta : bool, default True
 vem_acceptable_inequity_level : float, default 0.1
     Acceptable inequity level for ``vem``, as a proportion. Also
     sets the VEM gauge's acceptable band.
-vem_use_mvp : bool, default False
+vem_use_mvp : bool, default True
     If True, use the market value proxy (as used in the VEI, so
     honouring `mvp_sale_price_share`) for sorting prices, otherwise use
     sale price (market_value_header)
@@ -599,7 +599,7 @@ vem_asr_col : str, default 'asr'
     Name of the ASR column in the ``vem``
     working frame. Only needs changing when a `vem_result` computed
     with a non-default ``asr_col`` is passed in.
-include_vem : bool, default True
+include_vem : bool, default False
     Whether to report the VEM verdict. False drops the VEM gauge (the
     remaining three are re-centred) and strips the moving-median
     chart of everything that reports a verdict: no

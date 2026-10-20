@@ -170,3 +170,94 @@ def test_the_printed_count_is_the_cleaned_sample_not_the_input(sales, capsys):
     rs.ratios(dirty, assessment_header=AV, market_value_header=MV,
               indicators=['Median'], ci_mode='bootstrap')
     assert f'{len(sales) - 100:,}' in capsys.readouterr().out
+
+
+# --- bootstrap intervals for MKI, RRI, VEI and VEM ------------------------
+
+def test_vei_and_vem_are_accepted_for_the_bootstrap():
+    # They used to be refused with "no bootstrap confidence interval is
+    # available for ['VEI', 'VEM']; they were dropped".
+    resolved, messages = normalize_ci_args(
+        ci_mode='bootstrap', ci_indicators=['VEI', 'VEM', 'MKI', 'RRI'],
+        study_indicators=['VEI', 'VEM', 'MKI', 'RRI'])
+    assert resolved['bootstrap_indicators'] == ['VEI', 'VEM', 'MKI', 'RRI']
+    assert not any('no bootstrap confidence interval' in m for m in messages)
+
+
+def test_indicators_map_to_the_columns_that_carry_their_interval():
+    from ratio_study.confint import bootstrap_ci_result_columns
+    assert bootstrap_ci_result_columns(['Median', 'MKI', 'RRI', 'VEI', 'VEM']) == [
+        'Median', 'Modified_Kakwani_Index', 'Reranking_Index', 'VEI',
+        'Inequity_severity', 'Inequity_prevalence']
+
+
+def test_mki_rri_vei_and_vem_get_bootstrap_intervals(sales):
+    # MKI and RRI were bootstrapped but filed under their long names, so the
+    # table, which asked for 'MKI_ci' / 'RRI_ci', silently showed neither.
+    wanted = ['Median', 'VEI', 'VEM', 'MKI', 'RRI']
+    with _no_dropped_ci_warning():
+        out = rs.ratios(sales.head(400), assessment_header=AV, market_value_header=MV,
+                        indicators=wanted, ci_indicators=wanted,
+                        ci_mode='bootstrap', ci_conf_level=90, ci_seed=7,
+                        print_ci_settings=False,
+                        bootstrap_args={'resamplings': 40})
+    row = out.iloc[0]
+    for col in ('Median_ci', 'VEI_ci', 'MKI_ci', 'RRI_ci',
+                'Inequity_severity_ci', 'Inequity_prevalence_ci'):
+        assert col in out.columns, col
+        low, high = (float(x.strip(' %')) for x in str(row[col]).strip('()').split(','))
+        assert low <= high, col
+    # Each interval sits next to its indicator, not at the end of the table.
+    cols = list(out.columns)
+    assert cols.index('VEI_ci') == cols.index('VEI') + 1
+    assert cols.index('RRI_ci') == cols.index('RRI') + 1
+    assert cols.index('MKI_ci') == cols.index('MKI') + 1
+
+
+def test_the_bootstrap_skips_labels_and_unrequested_columns():
+    # A resample returns 'VEI_conclusion' / 'Inequity_conclusion' strings and
+    # by-products such as 'Weighted_Mean'; only what was asked for is
+    # intervalled.
+    from ratio_study.ratio_study import _bootstrap_analysis
+    df = rs.load_sample_dataset().head(300)
+    out = _bootstrap_analysis(df, assessment_header=AV, market_value_header=MV,
+                              weights_header=None, confint_level=0.9,
+                              bootstrap_method='percentile',
+                              bootstrap_resamplings=30,
+                              population_ratios={}, ci_only=True,
+                              req_significance=0.05, indicators=['VEI', 'VEM', 'MKI'],
+                              seed=3)
+    assert set(out) == {'VEI_ci', 'Inequity_severity_ci',
+                        'Inequity_prevalence_ci', 'Modified_Kakwani_Index_ci'}
+
+
+class _no_dropped_ci_warning:
+    """Fail if `ratios` warns that a requested interval was dropped."""
+    def __enter__(self):
+        import warnings
+        self._cm = warnings.catch_warnings(record=True)
+        self._log = self._cm.__enter__()
+        warnings.simplefilter('always')
+        return self
+
+    def __exit__(self, *exc):
+        self._cm.__exit__(*exc)
+        dropped = [str(w.message) for w in self._log
+                   if 'confidence interval is available' in str(w.message)]
+        assert not dropped, dropped
+        return False
+
+
+def test_an_interval_through_zero_is_not_a_finding_for_vei_vem_or_rri(sales):
+    # Zero is the ideal VEI, VEM severity / prevalence and RRI. Once these
+    # got bootstrap intervals, the generic "could be zero" fallback marked
+    # them as findings on a perfectly equitable sample.
+    wanted = ['Median', 'VEI', 'VEM', 'RRI']
+    out = rs.ratios(sales.head(400), assessment_header=AV, market_value_header=MV,
+                    descriptive=True, indicators=wanted, ci_indicators=wanted,
+                    ci_mode='bootstrap', ci_seed=7, print_ci_settings=False,
+                    bootstrap_args={'resamplings': 40})
+    comments = ' '.join(out.filter(like='Comments').astype(str).iloc[0])
+    assert 'could be zero' not in comments
+    for col in ('VEI', 'Inequity_severity', 'Inequity_prevalence', 'RRI'):
+        assert chr(8869) not in str(out.iloc[0][col]), col

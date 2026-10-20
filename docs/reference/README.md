@@ -12,7 +12,8 @@ Generated from the package docstrings by `tools/generate_api_docs.py`. Do not ed
 | [Gini family](gini.md) | 4 | Quintos’ Gini measures and decompositions (Appendix F). |
 | [Sales chasing](sales-chasing.md) | 9 | The Appendix B detection techniques. |
 | [ML diagnostics](ml-diagnostics.md) | 12 | ASR predictability and the SHAP explanation family. |
+| [Blinder–Oaxaca](blinder-oaxaca.md) | 6 | Decomposing a ratio gap between two groups. |
 | [Reporting helpers](reporting.md) | 1 | Comparison tables and export helpers. |
 | [Sample data](sample-data.md) | 2 | The bundled anonymised sales file. |
 
-**71 documented functions.**
+**77 documented functions.**

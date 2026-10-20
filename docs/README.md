@@ -2,7 +2,7 @@
 
 Ratio studies for Computer Assisted Mass Appraisal (CAMA), in Python.
 
-Aligned to the IAAO **Standard on Ratio Studies, September 2026**.
+Aligned to the IAAO **Standard on Ratio Studies, October 2026**.
 
 Developed and maintained by **ASMA-DS**, the Data Science team within the
 Assessment Standards and Mass Appraisal department at the Municipal Property
@@ -46,7 +46,7 @@ rs.ratios(sales,
 
 ## What it does
 
-**Standards-complete.** The September 2026 indicators, their compliance ranges,
+**Standards-complete.** The October 2026 indicators, their compliance ranges,
 the Appendix D confidence intervals, the Appendix C outlier rules, the Appendix
 E VEI and the Appendix B sales-chasing techniques — implemented once and tested.
 

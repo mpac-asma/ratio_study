@@ -2308,13 +2308,13 @@ def vertical_equity_panel(df,
                           vei_percentile_method='R7',
                           vei_use_log_normal_delta=True,
                           vem_acceptable_inequity_level=0.1,
-                          vem_use_mvp=False,
+                          vem_use_mvp=True,
                           vem_window_size=None,
                           vem_conf_level=0.9,
                           vem_zoom_y=True,
                           vem_smart_zoom=True,
                           vem_asr_col='asr',
-                          include_vem=True,
+                          include_vem=False,
                           gauge_outer_multiple=3.0,
                           x_scale='log',
                           title='Vertical Equity Panel',
@@ -2447,7 +2447,7 @@ def vertical_equity_panel(df,
     vem_acceptable_inequity_level : float, default 0.1
         Acceptable inequity level for ``vem``, as a proportion. Also
         sets the VEM gauge's acceptable band.
-    vem_use_mvp : bool, default False
+    vem_use_mvp : bool, default True
         If True, use the market value proxy (as used in the VEI, so
         honouring `mvp_sale_price_share`) for sorting prices, otherwise use
         sale price (market_value_header)
@@ -2472,7 +2472,7 @@ def vertical_equity_panel(df,
         Name of the ASR column in the ``vem``
         working frame. Only needs changing when a `vem_result` computed
         with a non-default ``asr_col`` is passed in.
-    include_vem : bool, default True
+    include_vem : bool, default False
         Whether to report the VEM verdict. False drops the VEM gauge (the
         remaining three are re-centred) and strips the moving-median
         chart of everything that reports a verdict: no
@@ -2692,8 +2692,11 @@ def vertical_equity_panel(df,
             chart_grid = fig.add_gridspec(
                 # Enough room for the VEI ticks (two lines each) and its
                 # axis label to clear the VEM title below them.
-                2, 1, hspace=0.58,
-                left=0.10, right=0.96, top=0.572, bottom=0.055,
+                # The top is held below the secondary strip so the VEI
+                # title ("Vertical Equity Indicator: ... Acceptable") has
+                # clear space above its axes instead of crowding the strip.
+                2, 1, hspace=0.72,
+                left=0.10, right=0.96, top=0.550, bottom=0.048,
             )
 
             for column, spec in enumerate(specs):
