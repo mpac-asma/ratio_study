@@ -3023,6 +3023,11 @@ def ratios_report(sales_df
                 error_messages_file = dict_results['errors'][0]
             return [error_messages_file]
 
+        # The export handlers below append here; it was only bound in the
+        # 'errors' branch above, so any export failure raised UnboundLocalError
+        # and masked the real exception.
+        error_messages = dict_results.setdefault('error_messages', [])
+
         if 'IQR_trimmed_sales' in dict_results and iqr_trim_multiple:
             if 'pdf_starting_comments' in pdf_args:
                 pdf_args['pdf_starting_comments'].append('Note on outliers trimming: ' + str(int(len(dict_results['IQR_trimmed_sales']))) + ' out of '+ str(int(len(sales_df))) + ' sales were trimmed from the sales file as extreme outliers, due to Sales Ratio being outside of ' + str(iqr_trim_multiple) + ' times the IQR range.')
